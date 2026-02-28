@@ -5,22 +5,31 @@ const BACKEND_BASE = "http://127.0.0.1:5000";
 const ROADS_ENDPOINT = "/roads";     // optional: draw roads
 const SIM_ENDPOINT = "/simulate";    // traffic positions
 
-// Polling rate: slower polling + smooth animation looks better
-const SIM_POLL_MS = 750;
+// How often we fetch snapshots
+const FETCH_MS = 400;
+
+// Smoothing time constant (ms). Bigger = smoother/less stepping.
+// Try 700–1500.
+const CHASE_TAU_MS = 900;
 
 // ======================
 // STATE
 // ======================
 let map;
-let roadsLayer = L.layerGroup();
-let carsLayer = L.layerGroup();
+let roadsLayer, carsLayer;
+let canvasRenderer;
 
-let simTimer = null;
 let simRunning = false;
+let simTimer = null;
 let centeredOnce = false;
 
-// For each car we store:
-// marker, from{lat,lon}, to{lat,lon}, t0(ms), t1(ms)
+let lastFrameMs = null;
+
+// id -> {
+//   marker,
+//   target:{lat,lon},     // latest backend position
+//   smooth:{lat,lon}      // filtered target the marker follows
+// }
 const cars = new Map();
 
 // ======================
@@ -40,7 +49,6 @@ async function fetchJSON(path) {
   return res.json();
 }
 
-// EXACT for your /roads response: {edges:[{start:{lat,lon}, end:{lat,lon}, id:"u-v"}]}
 function parseEdges(roadsJson) {
   const edges = roadsJson.edges ?? [];
   return edges.map(e => ({
@@ -51,34 +59,35 @@ function parseEdges(roadsJson) {
   }));
 }
 
-// EXACT for your /simulate response: [{id, lat, lon}, ...]
 function parseCars(simJson) {
   return (simJson ?? [])
     .map(c => ({ id: c.id, lat: c.lat, lon: c.lon }))
     .filter(c => typeof c.lat === "number" && typeof c.lon === "number");
 }
 
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
+function lerp(a, b, t) { return a + (b - a) * t; }
 
-function clamp01(x) {
-  return Math.max(0, Math.min(1, x));
+// Exponential smoothing factor from dt and tau
+function alphaFromDt(dtMs, tauMs) {
+  // alpha = 1 - exp(-dt/tau)
+  return 1 - Math.exp(-dtMs / Math.max(1, tauMs));
 }
 
 // ======================
 // MAP INIT
 // ======================
 function initMap() {
-  map = L.map("map").setView([37.951, -91.771], 14);
+  map = L.map("map", { preferCanvas: true }).setView([37.951, -91.771], 14);
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution: "&copy; OpenStreetMap"
   }).addTo(map);
 
-  roadsLayer.addTo(map);
-  carsLayer.addTo(map);
+  canvasRenderer = L.canvas({ padding: 0.5 });
+
+  roadsLayer = L.layerGroup().addTo(map);
+  carsLayer = L.layerGroup().addTo(map);
 }
 
 // ======================
@@ -91,17 +100,20 @@ async function loadRoads() {
 
   roadsLayer.clearLayers();
   edges.forEach(edge => {
-    L.polyline(edge.coords, { weight: 3, opacity: 0.5 }).addTo(roadsLayer);
+    L.polyline(edge.coords, {
+      weight: 3,
+      opacity: 0.5,
+      renderer: canvasRenderer
+    }).addTo(roadsLayer);
   });
 
   setStatus(`Roads loaded: ${edges.length} edges`);
 }
 
 // ======================
-// SMOOTH TRAFFIC
+// TRAFFIC (chase smoothing)
 // ======================
 async function pollSimOnce() {
-  const now = performance.now();
   const simJson = await fetchJSON(SIM_ENDPOINT);
   const list = parseCars(simJson);
 
@@ -112,37 +124,30 @@ async function pollSimOnce() {
 
   const seen = new Set();
 
-  for (const c of list) {
-    seen.add(c.id);
+  for (const p of list) {
+    seen.add(p.id);
 
-    if (!cars.has(c.id)) {
-      // First time seeing this car: create marker, set from=to=current
-      const marker = L.circleMarker([c.lat, c.lon], { radius: 6 }).addTo(carsLayer);
-      marker.bindPopup(`Car ${c.id}`);
+    if (!cars.has(p.id)) {
+      const marker = L.circleMarker([p.lat, p.lon], {
+        radius: 6,
+        renderer: canvasRenderer
+      }).addTo(carsLayer);
 
-      cars.set(c.id, {
+      marker.bindPopup(`Car ${p.id}`);
+
+      cars.set(p.id, {
         marker,
-        from: { lat: c.lat, lon: c.lon },
-        to: { lat: c.lat, lon: c.lon },
-        t0: now,
-        t1: now + SIM_POLL_MS
+        target: { lat: p.lat, lon: p.lon },
+        smooth: { lat: p.lat, lon: p.lon }
       });
     } else {
-      // Update target: move "from" to the marker's current rendered position,
-      // then set "to" to the new backend position
-      const car = cars.get(c.id);
-
-      // current rendered position (where the marker is right now)
-      const ll = car.marker.getLatLng();
-      car.from = { lat: ll.lat, lon: ll.lng };
-
-      car.to = { lat: c.lat, lon: c.lon };
-      car.t0 = now;
-      car.t1 = now + SIM_POLL_MS;
+      const car = cars.get(p.id);
+      car.target.lat = p.lat;
+      car.target.lon = p.lon;
     }
   }
 
-  // Remove cars not present
+  // Remove missing cars
   for (const [id, car] of cars.entries()) {
     if (!seen.has(id)) {
       carsLayer.removeLayer(car.marker);
@@ -150,37 +155,45 @@ async function pollSimOnce() {
     }
   }
 
-  setStatus(`Traffic update: ${list.length} cars (poll ${SIM_POLL_MS}ms)`);
+  setStatus(`Traffic: ${list.length} cars (fetch ${FETCH_MS}ms, tau ${CHASE_TAU_MS}ms)`);
 }
 
-function animateFrame(now) {
+function animateFrame(nowMs) {
   if (!simRunning) return;
 
+  if (lastFrameMs == null) lastFrameMs = nowMs;
+  const dt = Math.min(100, Math.max(0, nowMs - lastFrameMs)); // clamp dt for stability
+  lastFrameMs = nowMs;
+
+  const a = alphaFromDt(dt, CHASE_TAU_MS);
+
   for (const car of cars.values()) {
-    const t = clamp01((now - car.t0) / (car.t1 - car.t0 || 1));
-    const lat = lerp(car.from.lat, car.to.lat, t);
-    const lon = lerp(car.from.lon, car.to.lon, t);
-    car.marker.setLatLng([lat, lon]);
+    // Smooth the target toward backend position
+    car.smooth.lat = lerp(car.smooth.lat, car.target.lat, a);
+    car.smooth.lon = lerp(car.smooth.lon, car.target.lon, a);
+
+    // Place marker at smoothed target
+    car.marker.setLatLng([car.smooth.lat, car.smooth.lon]);
   }
 
   requestAnimationFrame(animateFrame);
 }
 
 function startTraffic() {
-  if (simTimer) return;
+  if (simRunning) return;
 
   simRunning = true;
-  document.getElementById("btn-toggle-sim").textContent = "Stop Traffic";
-  setStatus("Traffic running (smooth)...");
+  lastFrameMs = null;
 
-  // Kick off animation loop
+  document.getElementById("btn-toggle-sim").textContent = "Stop Traffic";
+  setStatus("Traffic running...");
+
   requestAnimationFrame(animateFrame);
 
-  // Poll backend (slower) for new targets
   pollSimOnce().catch(err => setStatus(`Sim error: ${err.message}`));
   simTimer = setInterval(() => {
     pollSimOnce().catch(err => setStatus(`Sim error: ${err.message}`));
-  }, SIM_POLL_MS);
+  }, FETCH_MS);
 }
 
 function stopTraffic() {
@@ -207,7 +220,5 @@ function initUI() {
 window.addEventListener("load", async () => {
   initMap();
   initUI();
-
-  // Optional: load roads on startup
   await loadRoads().catch(err => setStatus(`Road load failed: ${err.message}`));
 });
