@@ -1,73 +1,124 @@
-1. Backend / Simulation (Python)
+**1️⃣ Backend Developer Cheat Sheet
+**
+Goal: Serve road and traffic data to frontend, handle user edits, and call simulation functions.
 
-Flask or FastAPI: serve the app, handle API requests from the frontend (e.g., traffic data, road edits, optimized traffic light settings).
+Files to work on:
 
-Traffic simulation logic in Python:
+backend/app.py
 
-Use NetworkX to represent roads as a graph (nodes = intersections, edges = road segments).
+backend/network.py
 
-Vehicles are objects moving along edges.
+Endpoints to create:
 
-Calculate congestion as cars / road_capacity.
+GET /roads → sends road network as JSON to frontend
 
-Optimization / traffic lights: simple Python functions to adjust green/red times per intersection based on congestion.
+POST /edit-road → receives road edits from frontend, updates network
 
-Optional data handling: pandas for historical patterns or generating simulated traffic.
+GET /simulate → calls simulation functions and returns traffic positions
 
-2. Frontend / Visualization
+Tasks:
 
-You’ll need some JS to display the map and let users interact. But you can keep it minimal:
+Load initial road network from network.py or OSMnx
 
-Leaflet.js: render the OpenStreetMap base map.
+Convert road network to JSON for frontend
 
-Draw / edit plugin: let users add/remove roads (just send changes back to Python backend).
+Update road network when frontend sends edits
 
-Simple vehicle animation: dots moving along roads, color-coded by congestion.
+Call traffic_simulation.py functions to get car positions
 
-Python integration: Flask/FastAPI can serve the HTML/JS page and provide API endpoints for:
+Make sure endpoints return JSON in a format frontend can use
 
-GET /roads → return road network + congestion info
+Interactions:
 
-POST /road → add/remove a road
+Frontend: Receives JSON for map drawing & traffic; receives user edits
 
-GET /optimization → return updated traffic light timings
+Simulation Developer: Calls their functions for traffic positions
 
-3. Natural Language / Queries (Optional)
+Test Steps:
 
-Python can handle rule-based queries about traffic:
+Run python app.py
 
-“Which intersection is most congested?” → analyze NetworkX graph
+Open browser → http://127.0.0.1:5000/roads → should return JSON
 
-“Which road is fastest right now?” → shortest path weighted by congestion
+Test /edit-road with Postman or fetch in frontend
 
-Optional: OpenAI API (Python) for “StatMuse-style” natural language queries.
+Test /simulate → check JSON of car positions
 
-4. Data Sources
 
-OpenStreetMap → for base road network (Python libraries like osmnx make it easy to pull road graphs)
+**2️⃣ Frontend Developer Cheat Sheet
+**
+Goal: Display map, roads, and traffic; handle user interaction.
 
-Simulated traffic → generate Python objects for cars moving along the graph
+Files to work on:
 
-Optional enrichment → peak hours, congestion patterns, or dummy stats
+frontend/index.html
 
-5. Recommended Workflow for Hackathon
+frontend/script.js
 
-Load map + road network: osmnx → NetworkX graph → send to frontend.
+frontend/style.css
 
-Simulate traffic in Python: generate vehicle positions each tick → calculate congestion.
+Tasks:
 
-Expose API endpoints: Flask/FastAPI → frontend requests traffic state & road edits.
+Use Leaflet to display map (index.html)
 
-Interactive map in JS: Leaflet.js shows roads + vehicles, allows user to add/remove roads.
+Fetch road network from GET /roads and draw roads as lines
 
-Optimization logic in Python: traffic lights update based on congestion → send new timings to frontend.
+Fetch traffic positions from GET /simulate and animate cars
 
-Optional NL interface: Python interprets questions and queries simulation.
+Add UI for adding/removing roads and send JSON via POST /edit-road
 
-✅ Pros of this approach:
+Make the map responsive and easy to interact with
 
-Most logic stays in Python (your strength)
+Interactions:
 
-Frontend is minimal (Leaflet + JS for visualization and interactivity)
+Backend: Fetches JSON data from backend endpoints; sends user edits to backend
 
-Hackathon MVP is achievable in a weekend
+Simulation Developer: Indirectly — receives simulation results from backend
+
+Test Steps:
+
+Open index.html in Live Server (VS Code extension)
+
+Check that roads appear from backend /roads endpoint
+
+Check traffic animation using /simulate endpoint
+
+Test adding/removing roads → ensure /edit-road updates backend
+
+
+**3️⃣ Simulation / Optimization Developer Cheat Sheet
+**
+Goal: Simulate traffic and provide data for frontend visualization.
+
+Files to work on:
+
+backend/traffic_simulation.py
+
+Tasks:
+
+Write functions to calculate vehicle positions on road network
+
+Optional: add congestion calculations or traffic optimization
+
+Make functions callable from backend (app.py) endpoints
+
+Return results in JSON-friendly format, e.g.:
+
+[
+  {"lat": 40.7585, "lon": -73.9855, "id": 1},
+  {"lat": 40.7595, "lon": -73.9865, "id": 2}
+]
+
+Interactions:
+
+Backend Developer: Backend calls simulation functions to get traffic data
+
+Frontend Developer: Never calls these functions directly
+
+Test Steps:
+
+Write a test function in traffic_simulation.py that returns sample traffic data
+
+Backend calls this function via /simulate → check JSON output
+
+Ensure the output can be animated by frontend
