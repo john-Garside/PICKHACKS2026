@@ -1,3 +1,5 @@
+import json
+from shapely.geometry import LineString, shape
 import osmnx as ox
 import networkx as nx
 
@@ -6,63 +8,6 @@ def save_rolla_boundary():
     boundary = ox.geocode_to_gdf("Rolla, Missouri, USA")
     boundary.to_file("rolla_boundary.geojson", driver="GeoJSON")
     print("Saved rolla_boundary.geojson")
-
-def calculate_road_score(data):
-    # Higher score = less likely a car will use this road
-    # (used as a cost/weight for shortest path routing)
-
-    length = data.get('length', 100)  # meters
-
-    # Use speed_kph if available, otherwise estimate from road type
-    speed = data.get('speed_kph', None)
-    if speed is None:
-        highway_speeds = {
-            'motorway': 100,
-            'trunk': 80,
-            'primary': 60,
-            'secondary': 50,
-            'tertiary': 40,
-            'residential': 25,
-            'service': 15,
-            'unknown': 30
-        }
-        highway = data.get('highway', 'unknown')
-        if isinstance(highway, list):
-            highway = highway[0]
-        speed = highway_speeds.get(highway, 30)
-
-    if isinstance(speed, list):
-        speed = float(speed[0])
-    speed = float(speed)
-
-    # Base travel time in seconds
-    travel_time = (length / 1000) / speed * 3600
-
-    # Penalize roads with fewer lanes (more likely to congest)
-    lanes = data.get('lanes', 1)
-    if isinstance(lanes, list):
-        lanes = int(lanes[0])
-    lanes = int(lanes)
-    lane_penalty = 1 / lanes  # fewer lanes = higher cost
-
-    # Penalize lower quality road types
-    highway_penalty = {
-        'motorway': 0.8,
-        'trunk': 0.9,
-        'primary': 1.0,
-        'secondary': 1.1,
-        'tertiary': 1.3,
-        'residential': 1.6,
-        'service': 2.0,
-        'unknown': 1.5
-    }
-    highway = data.get('highway', 'unknown')
-    if isinstance(highway, list):
-        highway = highway[0]
-    penalty = highway_penalty.get(highway, 1.5)
-
-    score = travel_time * lane_penalty * penalty
-    return score
 
 
 def load_network():
@@ -73,8 +18,8 @@ def load_network():
     G = ox.add_edge_travel_times(G)
 
     # Calculate and store road score on every edge
-    for u, v, data in G.edges(data=True):
-        data['road_score'] = calculate_road_score(data)
+    geojson_file = 'jobs_8773253_results_Rolla_Full.geojson'
+    G = apply_traffic_data(G, geojson_file)
 
     return G
 
@@ -134,4 +79,48 @@ def remove_road(G, data):
     v = data['end_node']
     if G.has_edge(u, v):
         G.remove_edge(u, v)
+    return G
+
+def apply_traffic_data(G, geojson_path):
+    """
+    Matches traffic segments from GeoJSON to the OSMnx graph edges.
+    """
+    with open(geojson_path, 'r') as f:
+        traffic_data = json.load(f)
+
+    print(f"Matching traffic data from {geojson_path}...")
+
+    # Iterate through each feature in the GeoJSON
+    for feature in traffic_data['features']:
+        # Skip the first metadata feature (it has no geometry)
+        if feature['geometry'] is None:
+            continue
+            
+        props = feature['properties']
+        
+        # Extract the metrics we want
+        # Note: We take the first result in segmentTimeResults (the 'Typical' data)
+        results = props.get('segmentTimeResults', [{}])[0]
+        avg_speed = results.get('harmonicAverageSpeed')
+        sample_size = results.get('sampleSize', 0)
+        
+        # Get the geometry (the line on the map)
+        geom = shape(feature['geometry'])
+        
+        # Find the midpoint of this traffic segment to help us locate it in our graph
+        midpoint = geom.interpolate(0.5, normalized=True)
+        
+        # Use OSMnx to find the nearest edge in our graph to this traffic segment
+        # This is the "Magic" that connects the two datasets
+        try:
+            u, v, key = ox.nearest_edges(G, midpoint.x, midpoint.y)
+            
+            # Store the traffic data directly on the graph edge
+            G[u][v][key]['traffic_speed'] = avg_speed
+            G[u][v][key]['traffic_volume'] = sample_size
+            
+        except Exception as e:
+            continue
+
+    print("Traffic data successfully merged into the road network.")
     return G
