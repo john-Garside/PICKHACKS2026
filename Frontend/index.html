@@ -1,1 +1,30 @@
-<!-- Map Visualisation-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Traffic Map</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+
+<body>
+  <header class="toolbar">
+    <div class="toolbar-left">
+      <button id="btn-refresh">Refresh Roads</button>
+      <button id="btn-toggle-sim" class="primary">Start Traffic</button>
+    </div>
+    <div class="toolbar-right">
+      <span id="status" class="status-inline">Ready.</span>
+    </div>
+  </header>
+
+  <main>
+    <div id="map"></div>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="./script.js"></script>
+</body>
+</html>
