@@ -1,0 +1,53 @@
+:root { --toolbar-h: 54px; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+
+.toolbar {
+  min-height: var(--toolbar-h);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  box-sizing: border-box;
+  border-bottom: 1px solid #ddd;
+  background: #fff;
+}
+
+.toolbar-left, .toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.toolbar button {
+  padding: 8px 10px;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.toolbar button.primary {
+  border-color: #222;
+  font-weight: 700;
+}
+
+.status-inline {
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+main {
+  height: calc(100% - var(--toolbar-h));
+}
+
+#map {
+  height: 100%;
+  width: 100%;
+}

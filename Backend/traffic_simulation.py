@@ -3,7 +3,7 @@ import random
 vehicles = []
 initialized = False
 
-def initialize_vehicles(G, num_vehicles=10):
+def initialize_vehicles(G, num_vehicles=500):
     global vehicles
     vehicles = []
     
