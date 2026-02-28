@@ -20,15 +20,22 @@ def get_roads():
 def edit_road():
     global G
     data = request.get_json()
-    action = data.get('action')  # 'add' or 'remove'
-    
+
+    if not data:
+        return jsonify({'error': 'No data received'}), 400
+
+    action = data.get('action')
+
+    if 'start_node' not in data or 'end_node' not in data:
+        return jsonify({'error': 'Missing node data'}), 400
+
     if action == 'add':
         G = add_road(G, data)
     elif action == 'remove':
         G = remove_road(G, data)
     else:
         return jsonify({'error': 'Invalid action'}), 400
-    
+
     return jsonify({'status': 'success'})
 
 @app.route('/simulate', methods=['GET'])
