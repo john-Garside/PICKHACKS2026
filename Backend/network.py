@@ -1,6 +1,11 @@
 import osmnx as ox
 import networkx as nx
 
+def save_rolla_boundary():
+    # Get the exact boundary OSMnx uses for Rolla
+    boundary = ox.geocode_to_gdf("Rolla, Missouri, USA")
+    boundary.to_file("rolla_boundary.geojson", driver="GeoJSON")
+    print("Saved rolla_boundary.geojson")
 
 def calculate_road_score(data):
     # Higher score = less likely a car will use this road
