@@ -29,8 +29,13 @@ def initialize_vehicles(G, volume_multiplier=1.0):
         adjusted_volume = base_volume * volume_multiplier
         
         # 3. Determine how many dots to show on this specific road
-        num_to_spawn = int(adjusted_volume / VOLUME_DENSITY_FACTOR)
-        
+        #num_to_spawn = int(adjusted_volume / VOLUME_DENSITY_FACTOR)
+        volume = data.get('traffic_volume', 0)
+        if volume > 0:
+            num_to_spawn = int(volume / 500)
+        else:
+        # Spawn 1 random car on 10% of roads so the map isn't empty
+            num_to_spawn = 1 if random.random() < 0.1 else 0
         # 4. Get the base speed (from GeoJSON or OSM default)
         speed_kph = data.get('traffic_speed') or data.get('speed_kph', 30)
         if isinstance(speed_kph, list): speed_kph = speed_kph[0]

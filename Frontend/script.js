@@ -19,6 +19,7 @@ let map;
 let roadsLayer, carsLayer;
 let canvasRenderer;
 
+let currentHour = 12; // Default to noon
 let simRunning = false;
 let simTimer = null;
 let centeredOnce = false;
@@ -114,7 +115,7 @@ async function loadRoads() {
 // TRAFFIC (chase smoothing)
 // ======================
 async function pollSimOnce() {
-  const simJson = await fetchJSON(SIM_ENDPOINT);
+  const simJson = await fetchJSON(`${SIM_ENDPOINT}?hour=${currentHour}`);
   const list = parseCars(simJson);
 
   if (!centeredOnce && list.length > 0) {
@@ -208,6 +209,23 @@ function stopTraffic() {
 // UI
 // ======================
 function initUI() {
+  const hourSlider = document.getElementById('hourSlider');
+  const hourLabel = document.getElementById('hourLabel');
+
+  if (hourSlider) {
+    hourSlider.oninput = function() {
+      currentHour = this.value;
+      
+      // Update the text label (e.g., "17:00" or "5:00 PM")
+      let displayHour = currentHour % 12 || 12;
+      let ampm = currentHour >= 12 ? 'PM' : 'AM';
+      hourLabel.innerText = `${displayHour}:00 ${ampm}`;
+      
+      setStatus(`Time set to ${displayHour}:00 ${ampm}`);
+    };
+  }
+
+  // Your existing buttons...
   document.getElementById("btn-refresh").onclick = () =>
     loadRoads().catch(err => setStatus(`Road error: ${err.message}`));
 

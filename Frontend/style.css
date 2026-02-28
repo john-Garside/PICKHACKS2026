@@ -43,6 +43,30 @@ html, body {
   opacity: 0.85;
 }
 
+.map-overlay {
+  position: absolute;
+  top: 70px; /* Below your toolbar */
+  left: 10px;
+  z-index: 1000; /* Keeps it above the Leaflet map */
+  background: white;
+  padding: 15px;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+  width: 220px;
+}
+
+.control-group input {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.stats-group {
+  margin-top: 10px;
+  border-top: 1px solid #eee;
+  padding-top: 5px;
+  color: #666;
+}
+
 main {
   height: calc(100% - var(--toolbar-h));
 }

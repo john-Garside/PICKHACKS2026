@@ -82,45 +82,31 @@ def remove_road(G, data):
     return G
 
 def apply_traffic_data(G, geojson_path):
-    """
-    Matches traffic segments from GeoJSON to the OSMnx graph edges.
-    """
     with open(geojson_path, 'r') as f:
         traffic_data = json.load(f)
 
-    print(f"Matching traffic data from {geojson_path}...")
+    # LITE MODE: Only take the first 200 segments for testing
+    features = traffic_data['features'][:200] 
+    
+    print(f"LITE MODE: Matching 200 segments (skipping {len(traffic_data['features'])-200})...")
 
-    # Iterate through each feature in the GeoJSON
-    for feature in traffic_data['features']:
-        # Skip the first metadata feature (it has no geometry)
-        if feature['geometry'] is None:
-            continue
-            
+    for feature in features:
+        if feature['geometry'] is None: continue
+        
         props = feature['properties']
-        
-        # Extract the metrics we want
-        # Note: We take the first result in segmentTimeResults (the 'Typical' data)
         results = props.get('segmentTimeResults', [{}])[0]
-        avg_speed = results.get('harmonicAverageSpeed')
-        sample_size = results.get('sampleSize', 0)
         
-        # Get the geometry (the line on the map)
+        # Get coordinates
         geom = shape(feature['geometry'])
-        
-        # Find the midpoint of this traffic segment to help us locate it in our graph
         midpoint = geom.interpolate(0.5, normalized=True)
         
-        # Use OSMnx to find the nearest edge in our graph to this traffic segment
-        # This is the "Magic" that connects the two datasets
         try:
+            # Find nearest edge
             u, v, key = ox.nearest_edges(G, midpoint.x, midpoint.y)
-            
-            # Store the traffic data directly on the graph edge
-            G[u][v][key]['traffic_speed'] = avg_speed
-            G[u][v][key]['traffic_volume'] = sample_size
-            
-        except Exception as e:
+            G[u][v][key]['traffic_speed'] = results.get('harmonicAverageSpeed')
+            G[u][v][key]['traffic_volume'] = results.get('sampleSize', 0)
+        except:
             continue
 
-    print("Traffic data successfully merged into the road network.")
+    print("Lite Traffic Data Loaded!")
     return G
