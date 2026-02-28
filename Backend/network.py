@@ -12,7 +12,41 @@ def save_rolla_boundary():
 
 def load_network():
     G = ox.graph_from_place("Rolla, Missouri, USA", network_type="drive")
+    
+    # Detect and classify intersections
+    # ============================================
+    for node, data in G.nodes(data=True):
 
+        # 1️⃣ Signalized intersections (from OSM)
+        if data.get("highway") == "traffic_signals":
+            data["control"] = "signal"
+            continue
+
+        # 2️⃣ Degree of node (how many roads meet)
+        degree = G.degree(node)
+
+        if degree < 3:
+            data["control"] = "none"   # not really an intersection
+            continue
+
+        # 3️⃣ Look at connected road types
+        connected_highways = set()
+
+        for u, v, key, edge_data in G.edges(node, keys=True, data=True):
+            highway = edge_data.get("highway")
+
+            if isinstance(highway, list):
+                highway = highway[0]
+
+            connected_highways.add(highway)
+
+        # 4️⃣ Heuristic classification
+        major_roads = {"primary", "secondary", "trunk"}
+
+        if connected_highways & major_roads:
+            data["control"] = "priority"  # likely stop-controlled or yield
+        else:
+            data["control"] = "none"  # residential free-flow
     # Add speed and travel time data from OSMnx
     G = ox.add_edge_speeds(G)
     G = ox.add_edge_travel_times(G)
@@ -21,6 +55,14 @@ def load_network():
     geojson_file = 'jobs_8773253_results_Rolla_Full.geojson'
     G = apply_traffic_data(G, geojson_file)
 
+    signal_count = sum(1 for _, d in G.nodes(data=True) if d.get("control") == "signal")
+    priority_count = sum(1 for _, d in G.nodes(data=True) if d.get("control") == "priority")
+    none_count = sum(1 for _, d in G.nodes(data=True) if d.get("control") == "none")
+
+    print("Signals:", signal_count)
+    print("Priority:", priority_count)
+    print("Free-flow:", none_count)
+    
     return G
 
 
@@ -82,31 +124,63 @@ def remove_road(G, data):
     return G
 
 def apply_traffic_data(G, geojson_path):
+    import numpy as np
+    from shapely.geometry import shape
+
     with open(geojson_path, 'r') as f:
         traffic_data = json.load(f)
 
-    # LITE MODE: Only take the first 200 segments for testing
-    features = traffic_data['features'][:200] 
-    
-    print(f"LITE MODE: Matching 200 segments (skipping {len(traffic_data['features'])-200})...")
+    features = traffic_data['features']
+    print(f"Matching {len(features)} traffic segments...")
 
+    mid_x = []
+    mid_y = []
+    valid_features = []
+
+    # ================================
+    # 1️⃣ Collect midpoints first
+    # ================================
     for feature in features:
-        if feature['geometry'] is None: continue
-        
-        props = feature['properties']
-        results = props.get('segmentTimeResults', [{}])[0]
-        
-        # Get coordinates
-        geom = shape(feature['geometry'])
-        midpoint = geom.interpolate(0.5, normalized=True)
-        
-        try:
-            # Find nearest edge
-            u, v, key = ox.nearest_edges(G, midpoint.x, midpoint.y)
-            G[u][v][key]['traffic_speed'] = results.get('harmonicAverageSpeed')
-            G[u][v][key]['traffic_volume'] = results.get('sampleSize', 0)
-        except:
+        if feature['geometry'] is None:
             continue
 
-    print("Lite Traffic Data Loaded!")
+        try:
+            geom = shape(feature['geometry'])
+            midpoint = geom.interpolate(0.5, normalized=True)
+
+            mid_x.append(midpoint.x)
+            mid_y.append(midpoint.y)
+            valid_features.append(feature)
+        except Exception:
+            continue
+
+    if not mid_x:
+        print("No valid traffic geometries found.")
+        return G
+
+    # ================================
+    # 2️⃣ Batch nearest edge lookup
+    # ================================
+    nearest_edges = ox.nearest_edges(
+        G,
+        X=np.array(mid_x),
+        Y=np.array(mid_y)
+    )
+
+    # ================================
+    # 3️⃣ Assign traffic data
+    # ================================
+    for i, feature in enumerate(valid_features):
+        props = feature.get('properties', {})
+        results = props.get('segmentTimeResults', [{}])[0]
+
+        try:
+            u, v, key = nearest_edges[i]
+
+            G[u][v][key]['traffic_speed'] = results.get('harmonicAverageSpeed')
+            G[u][v][key]['traffic_volume'] = results.get('sampleSize', 0)
+        except Exception:
+            continue
+
+    print("Full traffic data loaded successfully!")
     return G

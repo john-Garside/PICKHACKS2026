@@ -14,13 +14,20 @@ df = pd.read_csv('RollaReport.csv')
 df['Time'] = pd.to_datetime(df['Time'])
 df['hour'] = df['Time'].dt.hour
 
-# Speed Multiplier: (Avg Speed at Hour) / (Overall Avg Speed)
 hourly_speeds = df.groupby('hour')['Speed [kmh]'].mean()
-speed_multipliers = (hourly_speeds / hourly_speeds.mean()).to_dict()
+overall_avg_speed = hourly_speeds.mean()
 
-# Volume Multiplier: (Avg Congestion at Hour) / (Overall Avg Congestion)
-hourly_cong = df.groupby('hour')['Congestion level [%]'].mean()
-volume_multipliers = (hourly_cong / hourly_cong.mean()).to_dict()
+# Demand increases when speeds drop
+demand_multipliers = {
+    hour: overall_avg_speed / hourly_speeds[hour]
+    for hour in hourly_speeds.index
+}
+
+# Speed scales relative to overall average
+speed_multipliers = {
+    hour: hourly_speeds[hour] / overall_avg_speed
+    for hour in hourly_speeds.index
+}
 
 # Load the road network once when the server starts
 G = load_network()
@@ -53,15 +60,17 @@ def edit_road():
 
 @app.route('/simulate', methods=['GET'])
 def simulate():
-    # Get the hour from the slider in the frontend (default to 12 PM)
     hour = int(request.args.get('hour', 12))
-    
-    # Get our multipliers for this specific hour
+
     s_mult = speed_multipliers.get(hour, 1.0)
-    v_mult = volume_multipliers.get(hour, 1.0)
-    
-    # Pass these to the simulation engine
-    positions = get_traffic_positions(G, speed_multiplier=s_mult, volume_multiplier=v_mult)
+    v_mult = demand_multipliers.get(hour, 1.0)
+
+    positions = get_traffic_positions(
+        G,
+        speed_multiplier=s_mult,
+        volume_multiplier=v_mult
+    )
+
     return jsonify(positions)
 
 if __name__ == '__main__':

@@ -1,189 +1,162 @@
 import random
-from shapely.geometry import LineString
 
-# ============================
 # Global state
-# ============================
 vehicles = []
 initialized = False
 current_vol_bin = -1  # Tracks if we need to re-spawn cars due to density changes
 
-# ============================
 # CONFIGURATION
-# ============================
 # How many seconds pass in the simulation for every backend update
-SIMULATION_STEP_TIME = 1.0
-
+SIMULATION_STEP_TIME = 1.0 
 # Adjust this to change overall car density (Higher = fewer cars)
-VOLUME_DENSITY_FACTOR = 500
+VOLUME_DENSITY_FACTOR = 500 
 
+def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
+    """
+    Fully data-driven vehicle spawning.
 
-# ============================
-# Vehicle spawning
-# ============================
-def initialize_vehicles(G, volume_multiplier=1.0):
+    Uses:
+    - GeoJSON traffic_volume for spatial weighting
+    - Hourly demand multiplier (volume_multiplier)
+    - Hourly speed multiplier (speed_multiplier)
     """
-    Spawns vehicles across the city based on GeoJSON sample sizes
-    and the hourly volume multiplier from the CSV.
-    """
+
     global vehicles
     vehicles = []
     vehicle_id = 0
 
-    # Iterate through every edge (road segment) in the network
+    # ============================
+    # 1️⃣ Collect edge weights
+    # ============================
+    edges_data = []
+    total_weight = 0
+
     for u, v, key, data in G.edges(keys=True, data=True):
-        # 1) Get baseline volume from GeoJSON data
+
         base_volume = data.get("traffic_volume", 0)
 
-        # 2) Apply hourly multiplier (kept for future use)
+        # If no probe data, give very small baseline
+        if base_volume <= 0:
+            base_volume = 1
+
+        # Apply hourly demand multiplier
         adjusted_volume = base_volume * volume_multiplier
 
-        # 3) Determine how many cars to spawn on this specific road
-        # NOTE: you're currently using raw volume logic; adjusted_volume left here if you want it
-        volume = data.get("traffic_volume", 0)
+        total_weight += adjusted_volume
+        edges_data.append((u, v, key, data, adjusted_volume))
 
-        if volume > 0:
-            num_to_spawn = int(volume / VOLUME_DENSITY_FACTOR)
-        else:
-            # Spawn 1 random car on 10% of roads so the map isn't empty
-            num_to_spawn = 1 if random.random() < 0.1 else 0
+    if total_weight == 0:
+        print("No traffic weights available.")
+        return
 
-        # 4) Get base speed (from GeoJSON or OSM default)
-        speed_kph = data.get("traffic_speed") or data.get("speed_kph", 30)
-        if isinstance(speed_kph, list):
-            speed_kph = speed_kph[0]
+    # ============================
+    # 2️⃣ Determine total city cars
+    # ============================
 
-        # 5) Create vehicles
+    BASE_CITY_CARS = 1200  # baseline population
+    MAX_CITY_CARS = int(BASE_CITY_CARS * volume_multiplier)
+
+    print(f"Spawning {MAX_CITY_CARS} vehicles for this hour.")
+
+    # ============================
+    # 3️⃣ Distribute proportionally
+    # ============================
+
+    for u, v, key, data, adjusted_volume in edges_data:
+
+        share = adjusted_volume / total_weight
+        num_to_spawn = int(share * MAX_CITY_CARS)
+
+        if num_to_spawn <= 0:
+            continue
+
+        # Base road speed from GeoJSON or OSM
+        base_speed = data.get("traffic_speed") or data.get("speed_kph", 30)
+
+        if isinstance(base_speed, list):
+            base_speed = base_speed[0]
+
+        # Apply hourly speed multiplier
+        effective_speed = float(base_speed) * speed_multiplier
+
         for _ in range(num_to_spawn):
             vehicles.append({
                 "id": vehicle_id,
                 "u": u,
                 "v": v,
                 "key": key,
-                "progress": random.random(),  # 0..1 progress along current edge
-                "speed_kph": float(speed_kph)
+                "progress": random.random(),
+                "speed_kph": effective_speed
             })
             vehicle_id += 1
 
-    print(f"Simulation loaded with {len(vehicles)} vehicles for this hour.")
+    print(f"Simulation loaded with {len(vehicles)} vehicles.")
 
-
-# ============================
-# Helpers
-# ============================
-def _edge_length_m(edge_data):
-    """Use OSMnx 'length' attribute (meters) for consistent physics."""
-    try:
-        length = float(edge_data.get("length", 10.0))
-    except Exception:
-        length = 10.0
-    return max(1.0, length)
-
-
-def _point_on_edge(G, u, v, key, progress):
-    """
-    Return (lat, lon) at normalized progress along the edge.
-    If geometry exists, follow it (curves). Otherwise, linear interpolate nodes.
-    """
-    edge_data = G[u][v][key]
-    geom = edge_data.get("geometry", None)
-    p = max(0.0, min(1.0, float(progress)))
-
-    if geom is not None:
-        try:
-            line = geom if isinstance(geom, LineString) else LineString(list(geom.coords))
-            if line.length > 0:
-                pt = line.interpolate(p, normalized=True)
-                # geometry points are (lon, lat)
-                return pt.y, pt.x
-        except Exception:
-            pass
-
-    # fallback: straight interpolation between u and v nodes
-    u_node = G.nodes[u]
-    v_node = G.nodes[v]
-    lat = u_node["y"] + p * (v_node["y"] - u_node["y"])
-    lon = u_node["x"] + p * (v_node["x"] - u_node["x"])
-    return lat, lon
-
-
-# ============================
-# Main simulation step
-# ============================
 def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
     """
-    Updates vehicle positions. Cars follow road geometry.
-    Seamless transitions: leftover distance carries into next edge.
-    Dead end behavior: instant respawn elsewhere, flagged as teleport=True for that tick.
+    Main loop: Updates vehicle positions based on physics and network flow.
     """
     global initialized, current_vol_bin
-
-    # If volume changed significantly, respawn cars
+    
+    # If the user moved the slider and the volume changed significantly, re-spawn cars
     vol_bin = round(volume_multiplier, 1)
     if not initialized or vol_bin != current_vol_bin:
-        initialize_vehicles(G, volume_multiplier)
+        initialize_vehicles(G, volume_multiplier, speed_multiplier)
         initialized = True
         current_vol_bin = vol_bin
-
+    
     positions = []
-
+    
     for vehicle in vehicles:
-        teleported_this_tick = False
-
-        # meters to move this tick
-        speed_mps = (vehicle["speed_kph"] * speed_multiplier) / 3.6
-        remaining_m = speed_mps * SIMULATION_STEP_TIME
-
-        # safety to avoid infinite loops if weird tiny edges
-        hops_left = 25
-
-        while remaining_m > 0 and hops_left > 0:
-            hops_left -= 1
-
-            u, v, key = vehicle["u"], vehicle["v"], vehicle["key"]
-            edge_data = G[u][v][key]
-            length_m = _edge_length_m(edge_data)
-
-            # meters remaining on current edge from current progress to 1.0
-            dist_left_on_edge = (1.0 - vehicle["progress"]) * length_m
-
-            if remaining_m < dist_left_on_edge:
-                # stays on current edge
-                vehicle["progress"] += remaining_m / length_m
-                remaining_m = 0.0
-            else:
-                # reaches end of edge this tick, carry leftover to next edge
-                remaining_m -= dist_left_on_edge
-
-                current_node = v
-                next_options = list(G.out_edges(current_node, keys=True))
-
-                if next_options:
-                    new_u, new_v, new_key = random.choice(next_options)
-                else:
-                    # ✅ dead-end: respawn to a random edge, mark teleport
-                    all_edges = list(G.edges(keys=True))
-                    new_u, new_v, new_key = random.choice(all_edges)
-                    teleported_this_tick = True
-
+        # 1. Get current road segment details
+        edge_data = G[vehicle["u"]][vehicle["v"]][vehicle["key"]]
+        length = edge_data.get('length', 10) # length in meters
+        
+        # 2. Calculate Actual Speed
+        # Base Speed (from GeoJSON) * Hourly Pulse (from CSV)
+        actual_speed_kph = vehicle["speed_kph"] * speed_multiplier
+        speed_mps = actual_speed_kph / 3.6  # Convert to meters per second
+        
+        # 3. Calculate Progress (0.0 to 1.0)
+        # Distance moved / Total road length
+        progress_increment = (speed_mps * SIMULATION_STEP_TIME) / length
+        vehicle["progress"] += progress_increment
+        
+        # 4. Handle reaching the end of a road
+        if vehicle["progress"] >= 1:
+            vehicle["progress"] = 0
+            
+            # Find the next connected roads (out_edges)
+            current_node = vehicle["v"]
+            next_options = list(G.out_edges(current_node, keys=True))
+            
+            if next_options:
+                # Move to a connected street (Realistic driving)
+                new_u, new_v, new_key = random.choice(next_options)
                 vehicle["u"], vehicle["v"], vehicle["key"] = new_u, new_v, new_key
-                vehicle["progress"] = 0.0
-
-                # update base speed for new edge
+                
+                # Update the vehicle's base speed for the new road
                 new_data = G[new_u][new_v][new_key]
-                new_speed = new_data.get("traffic_speed") or new_data.get("speed_kph", 30)
-                if isinstance(new_speed, list):
-                    new_speed = new_speed[0]
+                new_speed = new_data.get('traffic_speed') or new_data.get('speed_kph', 30)
+                if isinstance(new_speed, list): new_speed = new_speed[0]
                 vehicle["speed_kph"] = float(new_speed)
+            else:
+                # Dead end? Reset to a random road in the city
+                all_edges = list(G.edges(keys=True))
+                vehicle["u"], vehicle["v"], vehicle["key"] = random.choice(all_edges)
 
-        # Convert progress on current edge into lat/lon following geometry
-        lat, lon = _point_on_edge(G, vehicle["u"], vehicle["v"], vehicle["key"], vehicle["progress"])
-
+        # 5. Coordinate Calculation (Linear Interpolation)
+        u_node = G.nodes[vehicle["u"]]
+        v_node = G.nodes[vehicle["v"]]
+        
+        p = vehicle["progress"]
+        lat = u_node['y'] + p * (v_node['y'] - u_node['y'])
+        lon = u_node['x'] + p * (v_node['x'] - u_node['x'])
+        
         positions.append({
             "id": vehicle["id"],
             "lat": lat,
-            "lon": lon,
-            "teleport": teleported_this_tick
+            "lon": lon
         })
-
+    
     return positions
