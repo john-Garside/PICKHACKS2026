@@ -1,12 +1,12 @@
 // ======================
-// CONFIG (matches backend)
+// CONFIG
 // ======================
 const BACKEND_BASE = "http://127.0.0.1:5000";
 const ROADS_ENDPOINT = "/roads";     // optional: draw roads
 const SIM_ENDPOINT = "/simulate";    // traffic positions
 
-// How often to call /simulate
-const SIM_POLL_MS = 250;
+// Polling rate: slower polling + smooth animation looks better
+const SIM_POLL_MS = 750;
 
 // ======================
 // STATE
@@ -17,12 +17,11 @@ let carsLayer = L.layerGroup();
 
 let simTimer = null;
 let simRunning = false;
-
-// carId -> Leaflet marker
-let carMarkers = new Map();
-
-// Auto-center once on the first received car position
 let centeredOnce = false;
+
+// For each car we store:
+// marker, from{lat,lon}, to{lat,lon}, t0(ms), t1(ms)
+const cars = new Map();
 
 // ======================
 // UTIL
@@ -45,7 +44,6 @@ async function fetchJSON(path) {
 function parseEdges(roadsJson) {
   const edges = roadsJson.edges ?? [];
   return edges.map(e => ({
-    id: e.id,
     coords: [
       [e.start.lat, e.start.lon],
       [e.end.lat, e.end.lon]
@@ -60,11 +58,18 @@ function parseCars(simJson) {
     .filter(c => typeof c.lat === "number" && typeof c.lon === "number");
 }
 
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function clamp01(x) {
+  return Math.max(0, Math.min(1, x));
+}
+
 // ======================
 // MAP INIT
 // ======================
 function initMap() {
-  // Default view doesn't really matter now, because we auto-center on first car
   map = L.map("map").setView([37.951, -91.771], 14);
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -86,53 +91,79 @@ async function loadRoads() {
 
   roadsLayer.clearLayers();
   edges.forEach(edge => {
-    L.polyline(edge.coords, { weight: 3, opacity: 0.6 }).addTo(roadsLayer);
+    L.polyline(edge.coords, { weight: 3, opacity: 0.5 }).addTo(roadsLayer);
   });
 
   setStatus(`Roads loaded: ${edges.length} edges`);
 }
 
 // ======================
-// TRAFFIC
+// SMOOTH TRAFFIC
 // ======================
 async function pollSimOnce() {
+  const now = performance.now();
   const simJson = await fetchJSON(SIM_ENDPOINT);
-  const cars = parseCars(simJson);
+  const list = parseCars(simJson);
 
-  // ✅ FIX: auto-center once so you can SEE the cars even if they aren't in Rolla
-  if (!centeredOnce && cars.length > 0) {
-    map.setView([cars[0].lat, cars[0].lon], 16);
+  if (!centeredOnce && list.length > 0) {
+    map.setView([list[0].lat, list[0].lon], 16);
     centeredOnce = true;
   }
 
   const seen = new Set();
 
-  cars.forEach(c => {
+  for (const c of list) {
     seen.add(c.id);
 
-    // Leaflet expects [lat, lng] and your backend uses "lon"
-    const ll = L.latLng(c.lat, c.lon);
-
-    let marker = carMarkers.get(c.id);
-    if (!marker) {
-      // slightly larger marker to be obvious
-      marker = L.circleMarker(ll, { radius: 7 }).addTo(carsLayer);
+    if (!cars.has(c.id)) {
+      // First time seeing this car: create marker, set from=to=current
+      const marker = L.circleMarker([c.lat, c.lon], { radius: 6 }).addTo(carsLayer);
       marker.bindPopup(`Car ${c.id}`);
-      carMarkers.set(c.id, marker);
-    } else {
-      marker.setLatLng(ll);
-    }
-  });
 
-  // Remove cars that disappeared
-  for (const [id, marker] of carMarkers.entries()) {
-    if (!seen.has(id)) {
-      carsLayer.removeLayer(marker);
-      carMarkers.delete(id);
+      cars.set(c.id, {
+        marker,
+        from: { lat: c.lat, lon: c.lon },
+        to: { lat: c.lat, lon: c.lon },
+        t0: now,
+        t1: now + SIM_POLL_MS
+      });
+    } else {
+      // Update target: move "from" to the marker's current rendered position,
+      // then set "to" to the new backend position
+      const car = cars.get(c.id);
+
+      // current rendered position (where the marker is right now)
+      const ll = car.marker.getLatLng();
+      car.from = { lat: ll.lat, lon: ll.lng };
+
+      car.to = { lat: c.lat, lon: c.lon };
+      car.t0 = now;
+      car.t1 = now + SIM_POLL_MS;
     }
   }
 
-  setStatus(`Traffic update: ${cars.length} cars`);
+  // Remove cars not present
+  for (const [id, car] of cars.entries()) {
+    if (!seen.has(id)) {
+      carsLayer.removeLayer(car.marker);
+      cars.delete(id);
+    }
+  }
+
+  setStatus(`Traffic update: ${list.length} cars (poll ${SIM_POLL_MS}ms)`);
+}
+
+function animateFrame(now) {
+  if (!simRunning) return;
+
+  for (const car of cars.values()) {
+    const t = clamp01((now - car.t0) / (car.t1 - car.t0 || 1));
+    const lat = lerp(car.from.lat, car.to.lat, t);
+    const lon = lerp(car.from.lon, car.to.lon, t);
+    car.marker.setLatLng([lat, lon]);
+  }
+
+  requestAnimationFrame(animateFrame);
 }
 
 function startTraffic() {
@@ -140,9 +171,12 @@ function startTraffic() {
 
   simRunning = true;
   document.getElementById("btn-toggle-sim").textContent = "Stop Traffic";
-  setStatus("Traffic running...");
+  setStatus("Traffic running (smooth)...");
 
-  // Call /simulate immediately, then repeatedly
+  // Kick off animation loop
+  requestAnimationFrame(animateFrame);
+
+  // Poll backend (slower) for new targets
   pollSimOnce().catch(err => setStatus(`Sim error: ${err.message}`));
   simTimer = setInterval(() => {
     pollSimOnce().catch(err => setStatus(`Sim error: ${err.message}`));
