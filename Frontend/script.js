@@ -2,14 +2,13 @@
 // CONFIG
 // ======================
 const BACKEND_BASE = "http://127.0.0.1:5000";
-const ROADS_ENDPOINT = "/roads";     // optional: draw roads
+const ROADS_ENDPOINT = "/roads";     // draw roads
 const SIM_ENDPOINT = "/simulate";    // traffic positions
 
 // How often we fetch snapshots
 const FETCH_MS = 400;
 
 // Smoothing time constant (ms). Bigger = smoother/less stepping.
-// Try 700–1500.
 const CHASE_TAU_MS = 900;
 
 // ======================
@@ -19,7 +18,7 @@ let map;
 let roadsLayer, carsLayer;
 let canvasRenderer;
 
-let currentHour = 12; // Default to noon
+let currentHour = 12; // number
 let simRunning = false;
 let simTimer = null;
 let centeredOnce = false;
@@ -50,27 +49,30 @@ async function fetchJSON(path) {
   return res.json();
 }
 
+// ✅ UPDATED: backend sends edges with e.coords = [{lat,lon}, ...]
 function parseEdges(roadsJson) {
   const edges = roadsJson.edges ?? [];
-  return edges.map(e => ({
-    coords: [
-      [e.start.lat, e.start.lon],
-      [e.end.lat, e.end.lon]
-    ]
-  }));
+  return edges
+    .map(e => {
+      const coords = (e.coords ?? [])
+        .map(p => [Number(p.lat), Number(p.lon)])
+        .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+
+      return { id: e.id ?? "", coords };
+    })
+    .filter(e => e.coords.length >= 2);
 }
 
+// ✅ UPDATED: include teleport flag from backend
 function parseCars(simJson) {
   return (simJson ?? [])
-    .map(c => ({ id: c.id, lat: c.lat, lon: c.lon }))
+    .map(c => ({ id: c.id, lat: c.lat, lon: c.lon, teleport: !!c.teleport }))
     .filter(c => typeof c.lat === "number" && typeof c.lon === "number");
 }
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 
-// Exponential smoothing factor from dt and tau
 function alphaFromDt(dtMs, tauMs) {
-  // alpha = 1 - exp(-dt/tau)
   return 1 - Math.exp(-dtMs / Math.max(1, tauMs));
 }
 
@@ -92,27 +94,47 @@ function initMap() {
 }
 
 // ======================
-// ROADS (optional)
+// ROADS (draw edges + fit to bounds)
 // ======================
 async function loadRoads() {
   setStatus("Loading roads...");
   const roadsJson = await fetchJSON(ROADS_ENDPOINT);
+
   const edges = parseEdges(roadsJson);
 
   roadsLayer.clearLayers();
-  edges.forEach(edge => {
+
+  if (edges.length === 0) {
+    console.log("ROADS RAW:", roadsJson);
+    setStatus("No drawable roads (check console for ROADS RAW).");
+    return;
+  }
+
+  const allPoints = [];
+
+  edges.forEach((edge, idx) => {
+    allPoints.push(...edge.coords);
+
     L.polyline(edge.coords, {
-      weight: 3,
-      opacity: 0.5,
-      renderer: canvasRenderer
-    }).addTo(roadsLayer);
+      weight: 5,
+      opacity: 0.9,
+      // If you want canvas for performance, uncomment:
+      // renderer: canvasRenderer
+    })
+      .bindTooltip(edge.id ? `Road ${edge.id}` : `Road ${idx}`, { sticky: true })
+      .addTo(roadsLayer);
   });
+
+  // Zoom to road network so you can actually see it
+  const bounds = L.latLngBounds(allPoints);
+  map.fitBounds(bounds.pad(0.12));
+  centeredOnce = true;
 
   setStatus(`Roads loaded: ${edges.length} edges`);
 }
 
 // ======================
-// TRAFFIC (chase smoothing)
+// TRAFFIC (chase smoothing + teleport snap)
 // ======================
 async function pollSimOnce() {
   const simJson = await fetchJSON(`${SIM_ENDPOINT}?hour=${currentHour}`);
@@ -145,6 +167,14 @@ async function pollSimOnce() {
       const car = cars.get(p.id);
       car.target.lat = p.lat;
       car.target.lon = p.lon;
+
+      // ✅ If backend says this was a respawn/dead-end teleport:
+      // hard-snap smoothing so it doesn't "fly" across the map.
+      if (p.teleport) {
+        car.smooth.lat = p.lat;
+        car.smooth.lon = p.lon;
+        car.marker.setLatLng([p.lat, p.lon]);
+      }
     }
   }
 
@@ -209,23 +239,27 @@ function stopTraffic() {
 // UI
 // ======================
 function initUI() {
-  const hourSlider = document.getElementById('hourSlider');
-  const hourLabel = document.getElementById('hourLabel');
+  const hourSlider = document.getElementById("hourSlider");
+  const hourLabel = document.getElementById("hourLabel");
 
   if (hourSlider) {
-    hourSlider.oninput = function() {
-      currentHour = this.value;
-      
-      // Update the text label (e.g., "17:00" or "5:00 PM")
+    currentHour = Number(hourSlider.value ?? 12);
+
+    const displayHourInit = currentHour % 12 || 12;
+    const ampmInit = currentHour >= 12 ? "PM" : "AM";
+    if (hourLabel) hourLabel.innerText = `${displayHourInit}:00 ${ampmInit}`;
+
+    hourSlider.oninput = function () {
+      currentHour = Number(this.value);
+
       let displayHour = currentHour % 12 || 12;
-      let ampm = currentHour >= 12 ? 'PM' : 'AM';
-      hourLabel.innerText = `${displayHour}:00 ${ampm}`;
-      
+      let ampm = currentHour >= 12 ? "PM" : "AM";
+      if (hourLabel) hourLabel.innerText = `${displayHour}:00 ${ampm}`;
+
       setStatus(`Time set to ${displayHour}:00 ${ampm}`);
     };
   }
 
-  // Your existing buttons...
   document.getElementById("btn-refresh").onclick = () =>
     loadRoads().catch(err => setStatus(`Road error: ${err.message}`));
 
