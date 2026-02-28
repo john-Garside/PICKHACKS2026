@@ -1,6 +1,6 @@
 #Flask Backend 
 #test ignoring branch
-
+import pandas as pd
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from network import load_network, add_road, remove_road, network_to_json
@@ -8,6 +8,19 @@ from traffic_simulation import get_traffic_positions
 
 app = Flask(__name__)
 CORS(app)
+
+# Load and prepare the Hourly "Pulse" data
+df = pd.read_csv('Rolla Report.csv')
+df['Time'] = pd.to_datetime(df['Time'])
+df['hour'] = df['Time'].dt.hour
+
+# Speed Multiplier: (Avg Speed at Hour) / (Overall Avg Speed)
+hourly_speeds = df.groupby('hour')['Speed [kmh]'].mean()
+speed_multipliers = (hourly_speeds / hourly_speeds.mean()).to_dict()
+
+# Volume Multiplier: (Avg Congestion at Hour) / (Overall Avg Congestion)
+hourly_cong = df.groupby('hour')['Congestion level [%]'].mean()
+volume_multipliers = (hourly_cong / hourly_cong.mean()).to_dict()
 
 # Load the road network once when the server starts
 G = load_network()
@@ -40,7 +53,15 @@ def edit_road():
 
 @app.route('/simulate', methods=['GET'])
 def simulate():
-    positions = get_traffic_positions(G)
+    # Get the hour from the slider in the frontend (default to 12 PM)
+    hour = int(request.args.get('hour', 12))
+    
+    # Get our multipliers for this specific hour
+    s_mult = speed_multipliers.get(hour, 1.0)
+    v_mult = volume_multipliers.get(hour, 1.0)
+    
+    # Pass these to the simulation engine
+    positions = get_traffic_positions(G, speed_multiplier=s_mult, volume_multiplier=v_mult)
     return jsonify(positions)
 
 if __name__ == '__main__':
