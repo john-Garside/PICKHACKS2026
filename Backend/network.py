@@ -11,10 +11,20 @@ def network_to_json(G):
     for u, v, data in G.edges(data=True):
         u_data = G.nodes[u]
         v_data = G.nodes[v]
+        
+        # If the edge has geometry (curved road), use it
+        if 'geometry' in data:
+            coords = [{'lat': lat, 'lon': lon} for lon, lat in data['geometry'].coords]
+        else:
+            # Straight road, just use the two endpoints
+            coords = [
+                {'lat': u_data['y'], 'lon': u_data['x']},
+                {'lat': v_data['y'], 'lon': v_data['x']}
+            ]
+        
         edges.append({
-            'start': {'lat': u_data['y'], 'lon': u_data['x']},
-            'end':   {'lat': v_data['y'], 'lon': v_data['x']},
-            'id':    f"{u}-{v}"
+            'coords': coords,
+            'id': f"{u}-{v}"
         })
     return {'edges': edges}
 
