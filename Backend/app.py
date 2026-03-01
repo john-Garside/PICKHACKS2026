@@ -143,12 +143,105 @@ def stops():
         })
     return jsonify(out)
 
+
+@app.route('/nodes', methods=['GET'])
+def nodes():
+    """Return all intersection nodes with their control type for hover tooltips."""
+    out = []
+    for node_id, data in G.nodes(data=True):
+        control = data.get('control', 'none')
+        x = data.get('x')
+        y = data.get('y')
+        if x is None or y is None:
+            continue
+        degree = G.degree(node_id)
+        # Only return actual intersections (degree >= 3) plus signals/priority
+        if degree < 3 and control == 'none':
+            continue
+        out.append({
+            'id': str(node_id),
+            'lat': float(y),
+            'lon': float(x),
+            'control': control,
+            'degree': degree
+        })
+    return jsonify(out)
+
 @app.route("/multipliers", methods=["GET"])
 def multipliers():
     hour = int(request.args.get("hour", 12))
     v = float(demand_multipliers.get(hour, 1.0))
     s = float(speed_multipliers.get(hour, 1.0))
     return jsonify({"hour": hour, "volume_multiplier": v, "speed_multiplier": s})
+
+
+# ============================
+# Wait stats for UI
+# ============================
+@app.route("/wait-stats", methods=["GET"])
+def wait_stats_endpoint():
+    """Return aggregated wait stats + signal mode for the frontend dashboard."""
+    from traffic_simulation import node_wait_stats, signal_timer
+    import signal_model as sm
+
+    stats = {}
+    for node_id, s in node_wait_stats.items():
+        avg = s["total"] / s["count"] if s["count"] else 0.0
+        stats[str(node_id)] = {
+            "avg": round(avg, 2),
+            "max": round(s["max"], 2),
+            "count": s["count"],
+            "ns_split": round(sm.node_ns_split.get(node_id, 0.5), 3),
+            "cycle": round(sm.node_cycle.get(node_id, sm.DEFAULT_CYCLE), 1),
+        }
+
+    overall_total = sum(s["total"] for s in node_wait_stats.values())
+    overall_count = sum(s["count"] for s in node_wait_stats.values())
+    overall_avg   = overall_total / overall_count if overall_count else 0.0
+    overall_max   = max((s["max"] for s in node_wait_stats.values()), default=0.0)
+
+    return jsonify({
+        "signal_mode":  sm.SIGNAL_MODE,
+        "sim_time":     round(signal_timer, 1),
+        "rl_updates":   len(sm.update_log),
+        "city_avg_wait": round(overall_avg, 2),
+        "city_max_wait": round(overall_max, 2),
+        "city_total_vehicles": overall_count,
+        "nodes": stats,
+    })
+
+
+# ============================
+# Signal mode toggle
+# ============================
+@app.route("/set-signal-mode", methods=["POST"])
+def set_signal_mode():
+    """Switch signal mode between 'fixed' and 'pretrained'."""
+    import signal_model as sm
+
+    data = request.get_json() or {}
+    mode = data.get("mode", "")
+
+    if mode not in ("fixed", "pretrained", "adaptive"):
+        return jsonify({"error": f"Invalid mode '{mode}'"}), 400
+
+    sm.SIGNAL_MODE = mode
+
+    if mode == "pretrained":
+        loaded = sm.load_model()
+        if not loaded:
+            sm.SIGNAL_MODE = "adaptive"
+            return jsonify({"signal_mode": "adaptive", "warning": "No saved model found, switched to adaptive"})
+
+    if mode == "fixed":
+        sm.node_ns_split.clear()
+        sm.node_cycle.clear()
+
+    # Clear accumulated wait stats from the previous model
+    from traffic_simulation import node_wait_stats
+    node_wait_stats.clear()
+
+    return jsonify({"signal_mode": sm.SIGNAL_MODE})
 
 
 # ============================
