@@ -67,12 +67,31 @@ html, body {
   color: #666;
 }
 
+/* ==========================
+   TOGGLES
+   ========================== */
+
 /* Toggle container */
 .view-toggle {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: 16px;
+
+  /* ✅ Changed: don’t force margin-left for every toggle (looks weird with 2 toggles) */
+  margin-left: 0;
+  padding-left: 6px;
+}
+
+/* ✅ Add spacing only once after the Start button */
+.toolbar-left > .view-toggle:first-of-type {
+  margin-left: 12px;
+}
+
+/* keep toggle text from wrapping awkwardly */
+.view-toggle span {
+  white-space: nowrap;
+  font-size: 14px;
+  opacity: 0.9;
 }
 
 /* Switch styling */
@@ -126,4 +145,3 @@ main {
   height: 100%;
   width: 100%;
 }
-

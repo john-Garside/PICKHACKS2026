@@ -40,13 +40,32 @@ def load_network():
 
             connected_highways.add(highway)
 
-        # 4️⃣ Heuristic classification
-        major_roads = {"primary", "secondary", "trunk"}
+        # 4️⃣ Classification:
+        #    1) If OSM explicitly tags stop/yield at this node -> priority
+        #    2) Else, tightened heuristic: major-road meets minor-road -> priority
+        #    3) Else -> none
 
-        if connected_highways & major_roads:
-            data["control"] = "priority"  # likely stop-controlled or yield
+        major_roads = {"primary", "secondary", "trunk"}
+        minor_roads = {"residential", "tertiary", "unclassified", "service", "living_street"}
+
+        # --- Explicit stop/yield tags (if present in your OSM data) ---
+        node_highway = data.get("highway")        # sometimes 'stop' or 'give_way' on nodes
+        traffic_sign = data.get("traffic_sign")  # sometimes 'stop' / 'yield'
+
+        explicit_stop = (node_highway == "stop") or (traffic_sign == "stop")
+        explicit_yield = (node_highway in {"give_way", "yield"}) or (traffic_sign == "yield")
+
+        if explicit_stop or explicit_yield:
+            data["control"] = "priority"
         else:
-            data["control"] = "none"  # residential free-flow
+            has_major = len(connected_highways & major_roads) > 0
+            has_minor = len(connected_highways & minor_roads) > 0
+
+            # Tightened heuristic: major meets minor
+            if has_major and has_minor:
+                data["control"] = "priority"
+            else:
+                data["control"] = "none"
     # Add speed and travel time data from OSMnx
     G = ox.add_edge_speeds(G)
     G = ox.add_edge_travel_times(G)

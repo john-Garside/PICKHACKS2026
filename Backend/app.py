@@ -4,7 +4,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from network import load_network, add_road, remove_road, network_to_json
-from traffic_simulation import get_traffic_positions, get_road_heat
+from traffic_simulation import get_traffic_positions, get_road_heat, get_signal_states
 
 app = Flask(__name__)
 CORS(app)
@@ -17,20 +17,19 @@ df['Time'] = pd.to_datetime(df['Time'])
 df['hour'] = df['Time'].dt.hour
 
 hourly_speeds = df.groupby('hour')['Speed [kmh]'].mean()
-overall_avg_speed = hourly_speeds.mean()
+hourly_freeflow = df.groupby('hour')['Free flow speed [kmh]'].mean()
+hourly_congestion = df.groupby('hour')['Congestion level [%]'].mean()
+peak_congestion = hourly_congestion.max()
 
-# Demand increases when speeds drop
 demand_multipliers = {
-    hour: overall_avg_speed / hourly_speeds[hour]
-    for hour in hourly_speeds.index
+    hour: hourly_congestion[hour] / peak_congestion
+    for hour in hourly_congestion.index
 }
 
-# Speed scales relative to overall average
 speed_multipliers = {
-    hour: hourly_speeds[hour] / overall_avg_speed
+    hour: hourly_speeds[hour] / hourly_freeflow[hour]
     for hour in hourly_speeds.index
 }
-
 # ============================
 # Load Network
 # ============================
@@ -77,10 +76,11 @@ def simulate():
     v_mult = demand_multipliers.get(hour, 1.0)
 
     positions = get_traffic_positions(
-        G,
-        speed_multiplier=s_mult,
-        volume_multiplier=v_mult
-    )
+    G,
+    speed_multiplier=s_mult,
+    volume_multiplier=v_mult,
+    dt=0.4
+)
 
     return jsonify(positions)
 
@@ -102,14 +102,53 @@ def road_heat():
 
     # ✅ Advance the simulation so cars actually move / exist
     _ = get_traffic_positions(
-        G,
-        speed_multiplier=s_mult,
-        volume_multiplier=v_mult
-    )
+    G,
+    speed_multiplier=s_mult,
+    volume_multiplier=v_mult,
+    dt=0.8
+)
 
     # ✅ Now compute heat based on updated vehicle locations
     heat_data = get_road_heat(G)
     return jsonify(heat_data)
+
+
+# ============================
+# 🚦 Signals (traffic lights) for UI
+# ============================
+@app.route('/signals', methods=['GET'])
+def signals():
+    """Return signal nodes + their current phase for the frontend."""
+    return jsonify(get_signal_states(G))
+
+
+# ============================
+# 🛑 Stop signs (priority intersections) for UI
+# ============================
+@app.route('/stops', methods=['GET'])
+def stops():
+    """Return priority-controlled nodes as stop-sign markers for the frontend."""
+    out = []
+    for node_id, data in G.nodes(data=True):
+        if data.get('control') != 'priority':
+            continue
+        x = data.get('x')
+        y = data.get('y')
+        if x is None or y is None:
+            continue
+        out.append({
+            'id': str(node_id),
+            'lat': float(y),
+            'lon': float(x)
+        })
+    return jsonify(out)
+
+@app.route("/multipliers", methods=["GET"])
+def multipliers():
+    hour = int(request.args.get("hour", 12))
+    v = float(demand_multipliers.get(hour, 1.0))
+    s = float(speed_multipliers.get(hour, 1.0))
+    return jsonify({"hour": hour, "volume_multiplier": v, "speed_multiplier": s})
 
 
 # ============================

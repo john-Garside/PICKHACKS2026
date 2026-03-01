@@ -13,36 +13,62 @@
   <header class="toolbar">
     <div class="toolbar-left">
       <button id="btn-refresh">Refresh Roads</button>
-      <button id="btn-toggle-sim" class="primary">Start Traffic</button>
+      <button id="btn-toggle-sim" class="primary">Start</button>
 
-      <!-- ✅ NEW VIEW TOGGLE -->
+      <!-- Heatmap/Cars toggle -->
       <div class="view-toggle">
-        <label class="switch">
-          <input type="checkbox" id="viewToggle">
-          <span class="slider round"></span>
-        </label>
         <span id="viewLabel">Heatmap</span>
+        <label class="switch">
+          <input type="checkbox" id="viewToggle" />
+          <span class="slider"></span>
+        </label>
       </div>
 
+      <!-- 🚦 Traffic lights toggle -->
+      <div class="view-toggle">
+        <span>Traffic Lights</span>
+        <label class="switch">
+          <input type="checkbox" id="lightsToggle" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <!-- 🛑 Stop signs toggle -->
+      <div class="view-toggle">
+        <span>Stop Signs</span>
+        <label class="switch">
+          <input type="checkbox" id="stopsToggle" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
     </div>
+
     <div class="toolbar-right">
       <span id="status" class="status-inline">Ready.</span>
     </div>
   </header>
 
   <main>
-    <div id="time-controls" class="map-overlay">
+    <!-- ⏱️ Overlay: Time + multipliers -->
+    <div class="map-overlay" id="time-controls">
       <div class="control-group">
-        <label for="hourSlider">
-          <b>Time of Day:</b> 
-          <span id="hourLabel">12:00 PM</span>
-        </label>
-        <input type="range" id="hourSlider" min="0" max="23" value="12" step="1">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+          <div style="font-weight:700;">Time</div>
+          <div id="hourLabel" style="font-weight:700;">12:00 PM</div>
+        </div>
+
+        <input id="hourSlider" type="range" min="0" max="23" step="1" value="12" />
       </div>
 
       <div class="stats-group">
-        <small>Traffic Volume: <span id="vol-mult">100%</span></small><br>
-        <small>Average Speed: <span id="speed-mult">100%</span></small>
+        <div style="display:flex; justify-content:space-between; padding-top:6px;">
+          <span>Traffic Volume</span>
+          <span id="vol-mult">100%</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; padding-top:6px;">
+          <span>Avg Speed</span>
+          <span id="speed-mult">100%</span>
+        </div>
       </div>
     </div>
 
