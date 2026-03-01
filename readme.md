@@ -1,78 +1,147 @@
-# PickHacks 2026: Smart City Traffic Simulator
+# Adaptive Grid 
+### PickHacks 2026 Project
 
-## Project Overview
-This project is a **smart city traffic and road planning simulator**.  
-It uses **Python (Flask + NetworkX + OSMnx) for backend and traffic simulation**, and **Leaflet.js for frontend map visualization**.  
-Users can view roads, simulate traffic, and interactively add/remove roads to see traffic changes in real-time.
+RollaFlow is a smart infrastructure tool designed to alleviate traffic congestion in Rolla, MO. By utilizing a machine-learned signal model and real-time simulation, the project visualizes traffic heatmaps and optimizes North-South / East-West signal timings to improve commuter wait times.
 
 ---
 
-## Table of Contents
-1. [Team Roles](#team-roles)
+## 🚀 Features
+
+### 🔥 Congestion Heatmap
+A smooth-scaling visualization of traffic density across the Rolla road network.
+
+### 🤖 Machine Learning Backend
+A trained model (`signal_model.json`) predicts optimal signal states based on stop sign counts and intersection data.
+
+### 🖥️ Interactive Frontend
+A clean web UI for visualizing:
+- Traffic flow
+- Network statistics
+- Signal behavior
+
+### 🗺️ Network Analysis
+Processes `.graphml` files to identify:
+- Stop signs
+- Intersection density
+- Road features
 
 ---
 
-## Team Roles
+## 📂 Project Structure
 
-### Backend Developer
-- **Goal:** Serve road and traffic data to frontend, handle user edits, call simulation functions.
-- **Files:** `backend/app.py`, `backend/network.py`
-- **Tasks:**
-  - Load initial road network (from `network.py` or OSMnx) and convert to JSON
-  - Create endpoints:
-    - `GET /roads` → returns road network JSON
-    - `POST /edit-road` → updates road network based on frontend edits
-    - `GET /simulate` → returns current traffic positions
-  - Update road network when frontend sends edits
-  - Call simulation functions from `traffic_simulation.py`
-- **Interactions:**
-  - **Frontend:** Receives JSON for map and traffic; receives user edits
-  - **Simulation Developer:** Calls their functions for traffic positions
-- **Testing Steps:**
-  1. Run `python app.py`
-  2. Open browser → `http://127.0.0.1:5000/roads` should return JSON
-  3. Test `/edit-road` with Postman or fetch in frontend
-  4. Test `/simulate` → check JSON of car positions
+```
+PICKHACKS2026/
+├── Backend/                  # Python Flask/Logic server
+│   ├── app.py                # Main API entry point
+│   ├── signal_model.py       # ML model architecture
+│   ├── train_signals.py      # Model training script
+│   └── traffic_simulation.py # Traffic flow simulation logic
+│
+├── Frontend/                 # Web-based visualization
+│   ├── index.html            # Main dashboard
+│   ├── script.js             # Map logic & API calls
+│   └── style.css             # Custom UI styling
+│
+├── Data/                     # Processed datasets & GeoJSON
+│
+└── requirements.txt          # Python dependencies
+```
 
 ---
 
-### Frontend Developer
-- **Goal:** Display map, roads, and traffic; handle user interactions
-- **Files:** `frontend/index.html`, `frontend/script.js`, `frontend/style.css`
-- **Tasks:**
-  - Display interactive map using Leaflet.js
-  - Fetch road network from `/roads` and draw roads
-  - Fetch traffic positions from `/simulate` and animate cars
-  - Add UI for adding/removing roads; send edits to backend (`POST /edit-road`)
-- **Interactions:**
-  - **Backend:** Fetches JSON data from backend endpoints; sends road edits
-  - **Simulation Developer:** Indirectly — receives simulation results via backend
-- **Testing Steps:**
-  1. Open `index.html` with Live Server
-  2. Check that roads appear from `/roads` endpoint
-  3. Check traffic animation using `/simulate` endpoint
-  4. Test adding/removing roads → ensure `/edit-road` updates backend
+## 🛠️ Installation & Setup
+
+### 1️⃣ Prerequisites
+
+- Python 3.x
+- Recommended: Virtual environment (`venv`)
 
 ---
 
-### Simulation / Optimization Developer
-- **Goal:** Calculate traffic, congestion, and optional optimization
-- **Files:** `backend/traffic_simulation.py`
-- **Tasks:**
-  - Write functions to calculate vehicle positions on the road network
-  - Optional: calculate congestion or optimize traffic lights
-  - Provide data in JSON-friendly format for backend to send to frontend
-  - Example JSON output:
-    ```json
-    [
-      {"lat": 40.7585, "lon": -73.9855, "id": 1},
-      {"lat": 40.7595, "lon": -73.9865, "id": 2}
-    ]
-    ```
-- **Interactions:**
-  - **Backend:** Backend calls simulation functions
-  - **Frontend:** Receives simulation data only through backend endpoints
-- **Testing Steps:**
-  1. Write a test function returning sample traffic data
-  2. Call it via `/simulate` endpoint → ensure valid JSON
-  3. Check frontend can animate vehicle positions
+### 2️⃣ Install Dependencies
+
+From the project root directory:
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+### 3️⃣ Start the Backend
+
+```bash
+cd Backend
+python app.py
+```
+
+---
+
+### 4️⃣ Start the Frontend
+
+In a new terminal window:
+
+```bash
+cd Frontend
+python -m http.server 8080
+```
+
+---
+
+### 5️⃣ Access the Application
+
+Open your browser and navigate to:
+
+```
+http://localhost:8080
+```
+
+---
+
+## 📊 Data Insights
+
+The project uses:
+
+- `processed_rolla_network.graphml`  
+  → Parses local infrastructure and intersection metadata  
+
+- `RollaReport.csv`  
+  → Used to train the signal optimization model  
+
+- `wait_stats.json`  
+  → Demonstrates measurable reduction in idle time after optimization  
+
+Our trained model correlates traffic volume and intersection features with optimal signal intervals, resulting in reduced commuter wait times and improved traffic flow.
+
+---
+
+## 🎯 Project Goal
+
+RollaFlow demonstrates how machine-learned signal optimization can:
+
+- Reduce congestion
+- Improve commute efficiency
+- Provide scalable infrastructure insights
+- Serve as a foundation for smart city traffic systems
+
+---
+
+## 📌 Future Improvements
+
+- Real-time API traffic integration (TomTom / Google / DOT feeds)
+- Reinforcement learning for adaptive signals
+- Multi-city scaling architecture
+- Cloud deployment with persistent simulation state
+
+---
+
+## 🏆 Built For
+
+PickHacks 2026  
+Missouri University of Science & Technology
+
+---
+
+## 📄 License
+
+This project was developed for educational and hackathon purposes.
