@@ -12,7 +12,7 @@ CORS(app)
 # ============================
 # Load Hourly Pulse Data
 # ============================
-df = pd.read_csv('RollaReport.csv')
+df = pd.read_csv('../RollaReport.csv')
 df['Time'] = pd.to_datetime(df['Time'])
 df['hour'] = df['Time'].dt.hour
 
