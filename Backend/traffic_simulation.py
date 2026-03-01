@@ -279,7 +279,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
                                 queue.pop(pos_in_q)
                             else:
                                 vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + float(dt)
-                                vehicle["progress"] = 0.999
+                                vehicle["progress"] = min(0.999, 0.97 - (pos_in_q * 0.015))
                                 remaining_m = 0 
                                 vehicle["current_speed_ms"] = 0 
                                 continue
@@ -303,7 +303,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
 
                             if vehicle.get("stop_timer", 0.0) > 0.0 or not gap_is_safe:
                                 vehicle["stop_timer"] = max(0, vehicle.get("stop_timer", 0.0) - float(dt))
-                                vehicle["progress"] = 0.999
+                                vehicle["progress"] = 0.97
                                 remaining_m = 0.0
                                 vehicle["current_speed_ms"] = 0 
                                 continue 
