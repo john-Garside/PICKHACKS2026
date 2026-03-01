@@ -1,4 +1,5 @@
 import random
+import time as _time
 from shapely.geometry import LineString
 
 # ============================
@@ -15,6 +16,19 @@ signal_timer = 0         # global simulation timer
 SIGNAL_CYCLE = 60        # total cycle seconds
 GREEN_DURATION = 30      # seconds green
 SATURATION_FLOW_PER_LANE = 1900  # vehicles per hour per lane
+
+# ============================
+# Wait-time tracking
+# ============================
+# Maps vehicle_id -> (node_id, sim_time_when_wait_started)
+vehicle_wait_start = {}
+
+# Per-node accumulated stats: { node_id: {"total": float, "count": int, "max": float} }
+node_wait_stats = {}
+
+# How often (in sim-seconds) to print a terminal summary
+WAIT_REPORT_INTERVAL = 60   # every 60 sim-seconds
+_last_report_at = 0
 
 # Simulation parameters
 SIMULATION_STEP_TIME = 1.0
@@ -58,6 +72,8 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
     global vehicles
     vehicles = []
     vehicle_id = 0
+    vehicle_wait_start.clear()
+    node_wait_stats.clear()
 
     # 1) Collect edge weights
     edges_data = []
@@ -154,6 +170,67 @@ def _point_on_edge(G, u, v, key, progress):
 
 
 # ============================
+# Wait-time helpers
+# ============================
+def _start_wait(vehicle_id, node_id):
+    """Record that a vehicle just started waiting at a signal node."""
+    global vehicle_wait_start
+    if vehicle_id not in vehicle_wait_start:
+        vehicle_wait_start[vehicle_id] = (node_id, signal_timer)
+
+
+def _end_wait(vehicle_id):
+    """Record that a vehicle finished waiting; update per-node stats."""
+    global vehicle_wait_start, node_wait_stats
+    if vehicle_id not in vehicle_wait_start:
+        return
+    node_id, start_t = vehicle_wait_start.pop(vehicle_id)
+    wait_s = signal_timer - start_t
+    if wait_s <= 0:
+        return
+    stats = node_wait_stats.setdefault(node_id, {"total": 0.0, "count": 0, "max": 0.0})
+    stats["total"] += wait_s
+    stats["count"] += 1
+    stats["max"] = max(stats["max"], wait_s)
+
+
+def _maybe_report_wait_stats(G):
+    """Print a wait-time summary to the terminal every WAIT_REPORT_INTERVAL sim-seconds."""
+    global _last_report_at
+    if signal_timer - _last_report_at < WAIT_REPORT_INTERVAL:
+        return
+    _last_report_at = signal_timer
+
+    if not node_wait_stats:
+        print(f"\n[Wait-Time Report @ sim t={signal_timer:.0f}s] No completed waits yet.\n")
+        return
+
+    # Sort by highest average wait
+    rows = []
+    for node_id, s in node_wait_stats.items():
+        avg = s["total"] / s["count"] if s["count"] else 0
+        rows.append((node_id, avg, s["max"], s["count"]))
+    rows.sort(key=lambda r: r[1], reverse=True)
+
+    print(f"\n{'='*65}")
+    print(f"  🚦 Signal Wait-Time Report  (sim time: {signal_timer:.0f}s)")
+    print(f"{'='*65}")
+    print(f"  {'Node ID':<18} {'Avg Wait':>10} {'Max Wait':>10} {'Vehicles':>10}")
+    print(f"  {'-'*18} {'-'*10} {'-'*10} {'-'*10}")
+    for node_id, avg, mx, cnt in rows[:15]:   # top 15 busiest signals
+        # Try to label with street name if available
+        print(f"  {str(node_id):<18} {avg:>9.1f}s {mx:>9.1f}s {cnt:>10,}")
+
+    overall_total = sum(s["total"] for s in node_wait_stats.values())
+    overall_count = sum(s["count"] for s in node_wait_stats.values())
+    overall_avg = overall_total / overall_count if overall_count else 0
+    overall_max = max(s["max"] for s in node_wait_stats.values())
+    print(f"  {'-'*18} {'-'*10} {'-'*10} {'-'*10}")
+    print(f"  {'CITY-WIDE TOTAL':<18} {overall_avg:>9.1f}s {overall_max:>9.1f}s {overall_count:>10,}")
+    print(f"{'='*65}\n")
+
+
+# ============================
 # Main simulation step
 # ============================
 def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
@@ -225,6 +302,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                     if vehicle["id"] not in edge_queues[edge_id]:
                         if not is_green or len(edge_queues[edge_id]) > 0:
                             edge_queues[edge_id].append(vehicle["id"])
+                            _start_wait(vehicle["id"], current_node)  # started waiting
 
                     # 2. Process Queue
                     if vehicle["id"] in edge_queues[edge_id]:
@@ -234,6 +312,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                         # Only proceed if GREEN and at the front of the line
                         if is_green and position_in_queue < discharge_rate:
                             queue.pop(position_in_queue)
+                            _end_wait(vehicle["id"])  # finished waiting
                             next_options = list(G.out_edges(current_node, keys=True))
                         else:
                             # HOLD AT INTERSECTION
@@ -311,6 +390,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
             "teleport": teleported_this_tick
         })
 
+    _maybe_report_wait_stats(G)
     return positions
 
 
