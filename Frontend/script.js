@@ -277,18 +277,16 @@ async function pollSignalsOnce() {
     if (!signalMarkers.has(id)) {
       const m = L.marker([lat, lon], { icon }).addTo(signalsLayer);
 
-      // ✅ Tooltip opens on hover and stays until unhover
+      // ✅ Tooltip is only visible while hovering (NOT permanent)
+      // Sticky keeps it "locked" to the hover area smoothly.
       m.bindTooltip(`Signal ${id} • NS: ${s.ns} • EW: ${s.ew}`, {
-        permanent: true,
         direction: "top",
         offset: [0, -14],
-        opacity: 0.95
+        opacity: 0.95,
+        sticky: true
       });
 
-      // Start hidden (only show while hovered)
-      m.closeTooltip();
-
-      // Attach hover handlers ONCE
+      // Show only while hovered
       m.on("mouseover", () => m.openTooltip());
       m.on("mouseout",  () => m.closeTooltip());
 
@@ -298,7 +296,7 @@ async function pollSignalsOnce() {
       m.setLatLng([lat, lon]);
       m.setIcon(icon);
 
-      // ✅ Update tooltip text only (no rebinding / no reattaching events)
+      // Update tooltip text only
       m.setTooltipContent(`Signal ${id} • NS: ${s.ns} • EW: ${s.ew}`);
     }
   }
@@ -306,6 +304,7 @@ async function pollSignalsOnce() {
   // remove signals no longer present
   for (const [id, m] of signalMarkers.entries()) {
     if (!seen.has(id)) {
+      m.closeTooltip();
       signalsLayer.removeLayer(m);
       signalMarkers.delete(id);
     }
@@ -601,8 +600,16 @@ function initUI() {
   if (lightsToggle) {
     lightsToggle.checked = true;
     lightsToggle.addEventListener("change", () => {
-      if (lightsToggle.checked) map.addLayer(signalsLayer);
-      else map.removeLayer(signalsLayer);
+      // Close any open tooltips before toggling visibility
+      for (const m of signalMarkers.values()) m.closeTooltip();
+
+      if (lightsToggle.checked) {
+        map.addLayer(signalsLayer);
+        // Ensure none pop open right after re-adding
+        for (const m of signalMarkers.values()) m.closeTooltip();
+      } else {
+        map.removeLayer(signalsLayer);
+      }
     });
   }
 }
