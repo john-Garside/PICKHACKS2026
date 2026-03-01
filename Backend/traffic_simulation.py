@@ -250,9 +250,33 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
                             remaining_m = 0 
                             continue 
                     else:
-                        # Light is green and no queue, proceed normally
-                        next_options = list(G.out_edges(current_node, keys=True))
-                
+                        # ===============================
+                        # Transition to next road (Weighted)
+                        # ===============================
+                        next_options = list(G.out_edges(current_node, keys=True, data=True))
+
+                        if next_options:
+                            # 1. Filter out the edge that goes back to where we just came from
+                            forward_options = [opt for opt in next_options if opt[1] != u]
+                            
+                            # If no forward options (dead end), use all options (turn around)
+                            choices = forward_options if forward_options else next_options
+                            
+                            # 2. Extract weights based on traffic_volume
+                            # Use a small floor (0.1) so low-volume roads still have a tiny chance
+                            weights = []
+                            for _, _, _, data in choices:
+                                vol = data.get("traffic_volume", 1)
+                                weights.append(max(0.1, float(vol)))
+
+                            # 3. Perform the weighted selection
+                            selected_edge = random.choices(choices, weights=weights, k=1)[0]
+                            new_u, new_v, new_key, _ = selected_edge
+                        else:
+                            # No out-edges: teleport to a random spot
+                            all_edges = list(G.edges(keys=True))
+                            new_u, new_v, new_key = random.choice(all_edges)
+                            teleported_this_tick = True
                 # ===============================
                 # PRIORITY INTERSECTION
                 # ===============================
