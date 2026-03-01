@@ -102,7 +102,7 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
         # Store the RAW base speed — do NOT multiply by speed_multiplier here.
         # The step loop applies speed_multiplier at move time, so it stays consistent
         # across edge hops and hour changes without requiring re-spawning. (BUG FIX)
-        base_speed = data.get("traffic_speed") or data.get("speed_kph", 30)
+        base_speed = data.get("speed_kph", 30)
         if isinstance(base_speed, list):
             base_speed = base_speed[0]
         base_speed = float(base_speed)
@@ -190,6 +190,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
         edge_map[(v["u"], v["v"], v["key"])].append(v)
 
     positions = []
+    all_edges_list = list(G.edges(keys=True, data=True))
 
     # 2. Iterate through each road segment
     for edge_id, road_vehicles in edge_map.items():
@@ -203,13 +204,14 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
         for i, vehicle in enumerate(road_vehicles):
             # Desired speed for this specific road
             v0 = (vehicle["speed_kph"] * speed_multiplier) / 3.6
+            v0 = max(v0, 5.0)
             curr_v = vehicle.get("current_speed_ms", v0)
 
             # Determine IDM acceleration based on car in front
             if i == 0:
                 # No car in front on THIS edge. 
                 # (Intersection logic handles the "virtual stop" below)
-                accel = 1.5 * (1 - (curr_v / v0)**4)
+                accel = get_idm_acceleration(curr_v, v0, 1000.0, v0)
             else:
                 leader = road_vehicles[i-1]
                 # Distance between cars
@@ -247,28 +249,39 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
 
                     if control == "signal":
                         is_green = is_green_for_edge(u, v, key, G, signal_timer)
+                        
+                        # 1. Advanced Lane Logic (Saturation Flow Reduction)
                         lanes = edge_data.get("lanes", 1)
                         if isinstance(lanes, list): lanes = lanes[0]
                         try: lanes = int(lanes)
                         except: lanes = 1
+                        
+                        effective_lanes = float(lanes)
+                        # Simulate a left-turn penalty: if a car is turning left on a single lane, 
+                        # it reduces the flow for everyone behind it.
+                        if effective_lanes == 1 and vehicle.get("is_turning_left"):
+                            effective_lanes *= 0.5 
 
-                        discharge_rate = (SATURATION_FLOW_PER_LANE * lanes / 3600) * float(dt)
+                        discharge_rate = (SATURATION_FLOW_PER_LANE * effective_lanes / 3600) * float(dt)
 
                         if vehicle["id"] not in edge_queues[edge_id]:
                             if not is_green or len(edge_queues[edge_id]) > 0:
                                 edge_queues[edge_id].append(vehicle["id"])
+                                # Assign a random turn intent when joining a queue
+                                vehicle["is_turning_left"] = random.random() < 0.2 
 
                         if vehicle["id"] in edge_queues[edge_id]:
                             queue = edge_queues[edge_id]
                             pos_in_q = queue.index(vehicle["id"])
+                            
                             if is_green and pos_in_q < discharge_rate:
                                 queue.pop(pos_in_q)
                             else:
                                 vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + float(dt)
                                 vehicle["progress"] = 0.999
                                 remaining_m = 0 
-                                vehicle["current_speed_ms"] = 0 # IDM reset
-                                continue 
+                                vehicle["current_speed_ms"] = 0 
+                                continue
                         
                     elif control == "priority":
                         major_roads = {"primary", "secondary", "trunk"}
@@ -278,19 +291,21 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
 
                         if coming_from_major:
                             vehicle["stopped_at_node"] = False
-                            vehicle["stop_timer"] = 0.0
                         else:
+                            # MINOR ROAD LOGIC
                             if not vehicle.get("stopped_at_node"):
-                                vehicle["stop_timer"] = 2.0
+                                vehicle["stop_timer"] = 1.0 # Mandatory stop
                                 vehicle["stopped_at_node"] = True
 
-                            if vehicle.get("stop_timer", 0.0) > 0.0:
-                                vehicle["stop_timer"] -= float(dt)
+                            # Check if gap is safe before proceeding
+                            gap_is_safe = check_gap_acceptance(G, v, vehicle)
+
+                            if vehicle.get("stop_timer", 0.0) > 0.0 or not gap_is_safe:
+                                vehicle["stop_timer"] = max(0, vehicle.get("stop_timer", 0.0) - float(dt))
                                 vehicle["progress"] = 0.999
                                 remaining_m = 0.0
-                                vehicle["current_speed_ms"] = 0 # IDM reset
-                                vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0.0) + float(dt)
-                                continue
+                                vehicle["current_speed_ms"] = 0 
+                                continue 
                             else:
                                 vehicle["stopped_at_node"] = False
 
@@ -303,17 +318,22 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
                         else:
                             new_u, new_v, new_key = random.choice(next_options)
                     else:
-                        all_edges = list(G.edges(keys=True))
-                        new_u, new_v, new_key = random.choice(all_edges)
+                        new_u, new_v, new_key, new_data = random.choice(all_edges_list)
                         teleported_this_tick = True
 
                     vehicle["u"], vehicle["v"], vehicle["key"] = new_u, new_v, new_key
                     vehicle["progress"] = 0.0
                     edge_id = (new_u, new_v, new_key)
                     new_data = G[new_u][new_v][new_key]
-                    new_speed = new_data.get("traffic_speed") or new_data.get("speed_kph", 30)
-                    if isinstance(new_speed, list): new_speed = new_speed[0]
-                    vehicle["speed_kph"] = float(new_speed)
+
+                    # ✅ FIX: Update BOTH speed values
+                    new_speed_kph = new_data.get("speed_kph", 30)
+                    if isinstance(new_speed_kph, list): new_speed_kph = new_speed_kph[0]
+                    vehicle["speed_kph"] = float(new_speed_kph)
+
+                    # ✅ FIX: Give the car an initial velocity so it isn't a "brick" on the highway
+                    # We set it to the desired speed (v0) of the new road immediately.
+                    vehicle["current_speed_ms"] = (vehicle["speed_kph"] * speed_multiplier) / 3.6
 
             # Final position calculation
             lat, lon = _point_on_edge(G, vehicle["u"], vehicle["v"], vehicle["key"], vehicle["progress"])
@@ -522,9 +542,10 @@ def get_idm_acceleration(v, v_lead, gap, v0):
     v0: desired speed (m/s) based on speed_multiplier
     """
     # Parameters for realistic driving
-    a = 1.5       # Max acceleration m/s^2
+    is_highway = v0 > 20 # ~72 km/h
+    a = 2.0 if is_highway else 1.5 # Max acceleration m/s^2
+    T = 1.0 if is_highway else 1.5 # Desired time headway (s)
     b = 2.0       # Comfortable deceleration m/s^2
-    T = 1.5       # Desired time headway (s)
     s0 = 2.0      # Minimum jam distance (m)
     delta = 4.0   # Acceleration exponent
     
@@ -538,3 +559,64 @@ def get_idm_acceleration(v, v_lead, gap, v0):
     # IDM Formula
     acceleration = a * (1 - (v / v0)**delta - (s_star / gap)**2)
     return acceleration
+
+
+def check_gap_acceptance(G, current_node, vehicle):
+    """
+    Checks if there is a safe gap on the major road.
+    Now takes the 'vehicle' object to check its wait time and road type.
+    """
+    # Track wait time for patience logic
+    wait_time = vehicle.get("wait_at_intersection_start", 0)
+    
+    for u, v, key, data in G.in_edges(current_node, keys=True, data=True):
+        highway = data.get("highway", "residential")
+        if isinstance(highway, list): highway = highway[0]
+        
+        if highway in {"primary", "secondary", "trunk", "motorway"}:
+            major_vehicles = [veh for veh in vehicles if veh["u"] == u and veh["v"] == v]
+            if not major_vehicles:
+                continue
+            
+            major_vehicles.sort(key=lambda x: x["progress"], reverse=True)
+            lead_veh = major_vehicles[0]
+            
+            # Distance and Time calculation
+            dist_remaining = (1.0 - lead_veh["progress"]) * _edge_length_m(data)
+            speed_ms = max(0.1, lead_veh.get("current_speed_ms", 10.0))
+            time_to_arrival = dist_remaining / speed_ms
+            
+            # DYNAMIC THRESHOLD CALL
+            dynamic_threshold = get_critical_gap(highway, wait_time)
+            
+            if time_to_arrival < dynamic_threshold:
+                return False 
+    return True
+
+
+def get_critical_gap(highway_type, wait_time=0.0):
+    """
+    Returns the required gap in seconds based on road type 
+    and how long the driver has been waiting.
+    """
+    # Base gaps (in seconds) for different road types
+    # Highways/Trunks usually have lower critical gaps in sims to favor flow
+    base_gaps = {
+        "motorway": 2.5,
+        "trunk": 3.0,
+        "primary": 3.5,
+        "secondary": 4.0,
+        "tertiary": 4.5,
+        "residential": 4.5
+    }
+    
+    threshold = base_gaps.get(str(highway_type), 4.0)
+    
+    # Patience factor: reduce required gap by 0.1s for every second waited
+    # but never go below a 'suicidal' 1.5s gap.
+    patience_reduction = min(2.0, wait_time * 0.1)
+    
+    # Add a bit of driver personality (stochasticity)
+    driver_variability = random.uniform(-0.5, 0.5)
+    
+    return max(1.5, threshold - patience_reduction + driver_variability)
