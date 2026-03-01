@@ -71,7 +71,7 @@ def load_network():
     G = ox.add_edge_travel_times(G)
 
     # Calculate and store road score on every edge
-    geojson_file = '../jobs_8773253_results_Rolla_Full.geojson'
+    geojson_file = 'jobs_8773253_results_Rolla_Full.geojson'
     G = apply_traffic_data(G, geojson_file)
 
     signal_count = sum(1 for _, d in G.nodes(data=True) if d.get("control") == "signal")
@@ -197,7 +197,8 @@ def apply_traffic_data(G, geojson_path):
             u, v, key = nearest_edges[i]
 
             G[u][v][key]['traffic_speed'] = results.get('harmonicAverageSpeed')
-            G[u][v][key]['traffic_volume'] = results.get('sampleSize', 0)
+            G[u][v][key]['traffic_volume'] = results.get('normalizedSampleSize', 0)
+            G[u][v][key]['traffic_speed_std'] = results.get('standardDeviationSpeed', 5.0)
         except Exception:
             continue
 
