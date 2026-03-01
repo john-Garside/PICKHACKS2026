@@ -143,13 +143,7 @@ def _point_on_edge(G, u, v, key, progress):
 def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
     """
     Update vehicle positions in the city.
-
-    Features:
-    - Vehicles follow road geometry
-    - Intersection types: signal / priority / free-flow
-    - Queues at signalized intersections
-    - Stop delays at priority intersections
-    - Time-of-day scaling of speed and number of cars
+    Features: directional traffic light phases (N-S vs E-W), queues, and delays.
     """
     global initialized, current_vol_bin, vehicles, edge_queues, vehicle_delay, signal_timer
 
@@ -168,11 +162,9 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
     for vehicle in vehicles:
         edge_id = (vehicle["u"], vehicle["v"], vehicle["key"])
     
-        # GLOBAL SAFETY CHECK: Ensure every edge the vehicle is on has a queue entry
         if edge_id not in edge_queues:
             edge_queues[edge_id] = []
 
-        
         teleported_this_tick = False
         remaining_m = (vehicle["speed_kph"] * speed_multiplier) / 3.6 * SIMULATION_STEP_TIME
 
@@ -186,9 +178,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
             length_m = _edge_length_m(edge_data)
             dist_left_on_edge = (1.0 - vehicle["progress"]) * length_m
 
-            # ===============================
             # Case 1: move along edge
-            # ===============================
             if remaining_m < dist_left_on_edge:
                 vehicle["progress"] += remaining_m / length_m
                 remaining_m = 0
@@ -196,61 +186,55 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                 # Vehicle reaches the end of the edge
                 remaining_m -= dist_left_on_edge
                 current_node = v
-
-                # Determine intersection type
                 control = G.nodes[current_node].get("control", "none")
 
                 # ===============================
-                # SIGNALIZED INTERSECTION
+                # SIGNALIZED INTERSECTION (FIXED)
                 # ===============================
                 if control == "signal":
-                    edge_id = (u, v, key)
+                    # Check directional green light
+                    is_green = is_green_for_edge(u, v, key, G, signal_timer)
+                    
                     lanes = edge_data.get("lanes", 1)
                     if isinstance(lanes, list): lanes = lanes[0]
-                    
                     try:
                         lanes = int(lanes)
                     except (ValueError, TypeError):
                         lanes = 1
 
-                    # Discharge rate: how many cars can pass per simulation step
-                    # (Saturation Flow * lanes) / 3600 seconds * step_time
+                    # Discharge logic
                     discharge_rate = (SATURATION_FLOW_PER_LANE * lanes / 3600) * SIMULATION_STEP_TIME
-                    is_green = (signal_timer % SIGNAL_CYCLE) < GREEN_DURATION
 
-                    # 1. If car is not in queue and it's RED or there's a line, join queue
+                    # 1. Join queue if RED or if there's already a line
                     if vehicle["id"] not in edge_queues[edge_id]:
                         if not is_green or len(edge_queues[edge_id]) > 0:
                             edge_queues[edge_id].append(vehicle["id"])
 
-                    # 2. If car is in the queue
+                    # 2. Process Queue
                     if vehicle["id"] in edge_queues[edge_id]:
                         queue = edge_queues[edge_id]
                         position_in_queue = queue.index(vehicle["id"])
 
-                        # Can this car discharge? 
-                        # Only if Green AND it's at the front of the line (within discharge capacity)
+                        # Only proceed if GREEN and at the front of the line
                         if is_green and position_in_queue < discharge_rate:
-                            queue.pop(position_in_queue) # Leave the queue
+                            queue.pop(position_in_queue)
                             next_options = list(G.out_edges(current_node, keys=True))
-                            # Let it proceed to the next edge logic below...
                         else:
-                            # Stay stuck at the end of the road
+                            # HOLD AT INTERSECTION
                             vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + SIMULATION_STEP_TIME
                             vehicle["progress"] = 0.999
-                            remaining_m = 0
+                            remaining_m = 0 
                             continue 
                     else:
-                        # Not in queue, light is green, just pass through
+                        # Light is green and no queue, proceed normally
                         next_options = list(G.out_edges(current_node, keys=True))
                 
-                
                 # ===============================
-                # PRIORITY INTERSECTION (stop/yield)
+                # PRIORITY INTERSECTION
                 # ===============================
                 elif control == "priority":
                     if not vehicle.get("stopped_at_node"):
-                        vehicle["stop_timer"] = 2  # 2 sec stop delay
+                        vehicle["stop_timer"] = 2
                         vehicle["stopped_at_node"] = True
 
                     if vehicle.get("stop_timer", 0) > 0:
@@ -270,7 +254,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                     next_options = list(G.out_edges(current_node, keys=True))
 
                 # ===============================
-                # Select next edge or teleport if dead-end
+                # Transition to next road
                 # ===============================
                 if next_options:
                     new_u, new_v, new_key = random.choice(next_options)
@@ -281,6 +265,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
 
                 vehicle["u"], vehicle["v"], vehicle["key"] = new_u, new_v, new_key
                 vehicle["progress"] = 0.0
+                edge_id = (new_u, new_v, new_key) # Update edge_id for the next loop/queue check
 
                 new_data = G[new_u][new_v][new_key]
                 new_speed = new_data.get("traffic_speed") or new_data.get("speed_kph", 30)
@@ -288,9 +273,8 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                     new_speed = new_speed[0]
                 vehicle["speed_kph"] = float(new_speed)
 
-        # Convert progress to lat/lon
+        # Final position calculation
         lat, lon = _point_on_edge(G, vehicle["u"], vehicle["v"], vehicle["key"], vehicle["progress"])
-
         positions.append({
             "id": vehicle["id"],
             "lat": lat,
@@ -298,9 +282,30 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
             "teleport": teleported_this_tick
         })
 
-    # Optional debug metric
-    avg_delay = sum(vehicle_delay.values()) / max(1, len(vehicle_delay))
-    print("Average delay:", round(avg_delay, 2), "seconds")
-
     return positions
 
+
+
+#Find if traffic light is green for each direction
+def is_green_for_edge(u, v, key, G, current_timer):
+    node_data = G.nodes[v]
+    if node_data.get("control") != "signal":
+        return True # Not a signalized intersection
+    
+    # Calculate cycle position
+    cycle_pos = current_timer % SIGNAL_CYCLE
+    
+    # Simple Phase Logic: 
+    # Determine if the incoming road (u -> v) is North-South or East-West
+    u_data = G.nodes[u]
+    v_data = G.nodes[v]
+    
+    # Calculate delta y vs delta x to find orientation
+    is_north_south = abs(u_data['y'] - v_data['y']) > abs(u_data['x'] - v_data['x'])
+    
+    if is_north_south:
+        # North-South is green for the first half of the cycle
+        return cycle_pos < (SIGNAL_CYCLE / 2)
+    else:
+        # East-West is green for the second half of the cycle
+        return cycle_pos >= (SIGNAL_CYCLE / 2)
