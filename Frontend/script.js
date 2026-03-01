@@ -2,26 +2,51 @@
 // CONFIG
 // ======================
 const BACKEND_BASE = "http://127.0.0.1:5000";
-const ROADS_ENDPOINT = "/roads";       // draw roads
-const HEAT_ENDPOINT = "/road-heat";    // road heat data
+const ROADS_ENDPOINT = "/roads";        // draw roads
+const HEAT_ENDPOINT = "/road-heat";     // road heat data (advances sim if your Flask route does)
+const SIM_ENDPOINT  = "/simulate";      // individual car positions
 
-// How often we update the heatmap
-const HEAT_MS = 800;
+// How often we update
+const HEAT_MS = 800;   // heatmap refresh
+const FETCH_MS = 400;  // car fetch refresh
+
+// Smoothing time constant (ms) for car markers
+const CHASE_TAU_MS = 900;
 
 // ======================
 // STATE
 // ======================
 let map;
-let roadsLayer;
+let roadsLayer;     // base roads (always neutral)
+let heatLayer;      // ✅ overlay heat layer (added/removed on toggle)
+let carsLayer;
 let canvasRenderer;
 
-let currentHour = 12; // number (optional, if you later want hour-based heat)
+let currentHour = 12;
+
+// viewMode: "heat" or "cars"
+let viewMode = "heat";
+
+// heat mode state
 let heatRunning = false;
 let heatTimer = null;
+
+// cars mode state
+let carsRunning = false;
+let simTimer = null;
+let lastFrameMs = null;
+
 let centeredOnce = false;
 
-// Store road polylines so we can recolor them
+// Base road polylines (neutral)
 const roadLines = new Map(); // edgeId -> polyline
+
+// ✅ Heat overlay polylines (colored by congestion)
+const heatLines = new Map(); // edgeId -> polyline
+
+// Store car markers + smoothing state
+// id -> { marker, target:{lat,lon}, smooth:{lat,lon} }
+const cars = new Map();
 
 // ======================
 // UTIL
@@ -53,8 +78,21 @@ function parseEdges(roadsJson) {
     .filter(e => e.id && e.coords.length >= 2);
 }
 
+// cars from /simulate
+function parseCars(simJson) {
+  return (simJson ?? [])
+    .map(c => ({ id: c.id, lat: c.lat, lon: c.lon, teleport: !!c.teleport }))
+    .filter(c => typeof c.lat === "number" && typeof c.lon === "number");
+}
+
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function alphaFromDt(dtMs, tauMs) {
+  return 1 - Math.exp(-dtMs / Math.max(1, tauMs));
 }
 
 // Green (low) -> Yellow (medium) -> Red (high)
@@ -88,7 +126,15 @@ function initMap() {
   }).addTo(map);
 
   canvasRenderer = L.canvas({ padding: 0.5 });
+
+  // Base roads always on
   roadsLayer = L.layerGroup().addTo(map);
+
+  // Heat overlay NOT added by default (so cars mode never shows heat)
+  heatLayer = L.layerGroup();
+
+  // Cars layer always exists, but only used in cars mode
+  carsLayer = L.layerGroup().addTo(map);
 }
 
 // ======================
@@ -100,7 +146,9 @@ async function loadRoads() {
   const edges = parseEdges(roadsJson);
 
   roadsLayer.clearLayers();
+  heatLayer.clearLayers();
   roadLines.clear();
+  heatLines.clear();
 
   if (edges.length === 0) {
     console.log("ROADS RAW:", roadsJson);
@@ -113,17 +161,28 @@ async function loadRoads() {
   edges.forEach((edge, idx) => {
     allPoints.push(...edge.coords);
 
-    // Start neutral/low heat color until heat loads
-    const line = L.polyline(edge.coords, {
-      color: "rgb(0,255,0)", // green by default
-      weight: 4,
-      opacity: 0.6,
+    // ✅ Base road (neutral gray) ALWAYS visible
+    const baseLine = L.polyline(edge.coords, {
+      color: "#555",
+      weight: 3,
+      opacity: 0.55,
       renderer: canvasRenderer
-    })
-      .bindTooltip(edge.id ? `Road ${edge.id}` : `Road ${idx}`, { sticky: true })
-      .addTo(roadsLayer);
+    }).addTo(roadsLayer);
 
-    roadLines.set(edge.id, line);
+    // ✅ Heat overlay line (only visible when heatLayer is added)
+    // Start invisible so cars mode doesn't show it even if created.
+    const heatLine = L.polyline(edge.coords, {
+      color: "rgb(0,255,0)",
+      weight: 5,
+      opacity: 0.0,
+      renderer: canvasRenderer
+    });
+
+    // Put tooltip on heat line (only shows in heat mode)
+    heatLine.bindTooltip(edge.id ? `Road ${edge.id}` : `Road ${idx}`, { sticky: true });
+
+    roadLines.set(edge.id, baseLine);
+    heatLines.set(edge.id, heatLine);
   });
 
   if (!centeredOnce && allPoints.length > 0) {
@@ -135,9 +194,22 @@ async function loadRoads() {
 }
 
 // ======================
-// HEATMAP (recolor roads) - smooth blend green->yellow->red
-// heatMap values are congestion ratios (ex: 0.2, 0.8, 1.4)
-// We scale ratio into 0..1 using FULL_RED_AT.
+// HEAT LAYER SHOW/HIDE
+// ======================
+function showHeatOverlay() {
+  // Add all heat polylines to heatLayer if not already
+  if (heatLayer.getLayers().length === 0) {
+    for (const line of heatLines.values()) heatLayer.addLayer(line);
+  }
+  if (!map.hasLayer(heatLayer)) heatLayer.addTo(map);
+}
+
+function hideHeatOverlay() {
+  if (map.hasLayer(heatLayer)) map.removeLayer(heatLayer);
+}
+
+// ======================
+// HEATMAP (style heat overlay lines)
 // ======================
 async function pollHeatOnce() {
   const heatJson = await fetchJSON(`${HEAT_ENDPOINT}?hour=${currentHour}`);
@@ -145,21 +217,19 @@ async function pollHeatOnce() {
   const heatMap = heatJson.heat ?? {};     // edgeId -> congestion ratio (NOT 0..1)
   const countMap = heatJson.counts ?? {};  // edgeId -> car count
 
-  // Congestion ratio where we consider it "fully red"
-  // 1.0 = at capacity, 1.5 = clearly overloaded (good for visuals)
+  // congestion ratio considered "fully red"
   const FULL_RED_AT = 1.5;
 
-  for (const [edgeId, line] of roadLines.entries()) {
-    const ratio = Number(heatMap[edgeId] ?? 0); // congestion ratio
+  for (const [edgeId, line] of heatLines.entries()) {
+    const ratio = Number(heatMap[edgeId] ?? 0);
     const c = Number(countMap[edgeId] ?? 0);
 
-    // Scale ratio into 0..1 for the color ramp + style ramp
     const t = clamp01(ratio / FULL_RED_AT);
 
     line.setStyle({
-      color: heatColor(t),                 // smooth blend
-      weight: 3 + 7 * t,                   // thicker when hotter
-      opacity: 0.25 + 0.75 * t             // more visible when hotter
+      color: heatColor(t),
+      weight: 3 + 7 * t,
+      opacity: 0.25 + 0.75 * t
     });
 
     line.bindTooltip(
@@ -172,13 +242,89 @@ async function pollHeatOnce() {
 }
 
 // ======================
-// START / STOP HEATMAP
+// CARS VIEW (individual cars)
+// ======================
+function clearCars() {
+  for (const car of cars.values()) {
+    carsLayer.removeLayer(car.marker);
+  }
+  cars.clear();
+}
+
+async function pollSimOnce() {
+  const simJson = await fetchJSON(`${SIM_ENDPOINT}?hour=${currentHour}`);
+  const list = parseCars(simJson);
+
+  const seen = new Set();
+
+  for (const p of list) {
+    seen.add(p.id);
+
+    if (!cars.has(p.id)) {
+      const marker = L.circleMarker([p.lat, p.lon], {
+        radius: 5,
+        renderer: canvasRenderer
+      }).addTo(carsLayer);
+
+      cars.set(p.id, {
+        marker,
+        target: { lat: p.lat, lon: p.lon },
+        smooth: { lat: p.lat, lon: p.lon }
+      });
+    } else {
+      const car = cars.get(p.id);
+      car.target.lat = p.lat;
+      car.target.lon = p.lon;
+
+      // snap on teleport so it doesn't "fly"
+      if (p.teleport) {
+        car.smooth.lat = p.lat;
+        car.smooth.lon = p.lon;
+        car.marker.setLatLng([p.lat, p.lon]);
+      }
+    }
+  }
+
+  // remove missing cars
+  for (const [id, car] of cars.entries()) {
+    if (!seen.has(id)) {
+      carsLayer.removeLayer(car.marker);
+      cars.delete(id);
+    }
+  }
+
+  setStatus(`Cars updated (${list.length})`);
+}
+
+function animateCarsFrame(nowMs) {
+  if (!carsRunning) return;
+
+  if (lastFrameMs == null) lastFrameMs = nowMs;
+  const dt = Math.min(100, Math.max(0, nowMs - lastFrameMs));
+  lastFrameMs = nowMs;
+
+  const a = alphaFromDt(dt, CHASE_TAU_MS);
+
+  for (const car of cars.values()) {
+    car.smooth.lat = lerp(car.smooth.lat, car.target.lat, a);
+    car.smooth.lon = lerp(car.smooth.lon, car.target.lon, a);
+    car.marker.setLatLng([car.smooth.lat, car.smooth.lon]);
+  }
+
+  requestAnimationFrame(animateCarsFrame);
+}
+
+// ======================
+// START / STOP (by mode)
 // ======================
 function startHeatmap() {
   if (heatRunning) return;
   heatRunning = true;
 
-  document.getElementById("btn-toggle-sim").textContent = "Stop Heatmap";
+  // ✅ ensure overlay is visible
+  showHeatOverlay();
+
+  document.getElementById("btn-toggle-sim").textContent = "Stop";
   setStatus("Heatmap running...");
 
   pollHeatOnce().catch(err => setStatus(`Heat error: ${err.message}`));
@@ -189,12 +335,71 @@ function startHeatmap() {
 
 function stopHeatmap() {
   heatRunning = false;
-  document.getElementById("btn-toggle-sim").textContent = "Start Heatmap";
-
   if (heatTimer) clearInterval(heatTimer);
   heatTimer = null;
+}
 
-  setStatus("Heatmap stopped.");
+function startCars() {
+  if (carsRunning) return;
+  carsRunning = true;
+
+  // ✅ ensure heat overlay is hidden in cars mode
+  hideHeatOverlay();
+
+  document.getElementById("btn-toggle-sim").textContent = "Stop";
+  setStatus("Cars view running...");
+
+  lastFrameMs = null;
+  requestAnimationFrame(animateCarsFrame);
+
+  pollSimOnce().catch(err => setStatus(`Sim error: ${err.message}`));
+  simTimer = setInterval(() => {
+    pollSimOnce().catch(err => setStatus(`Sim error: ${err.message}`));
+  }, FETCH_MS);
+}
+
+function stopCars() {
+  carsRunning = false;
+  if (simTimer) clearInterval(simTimer);
+  simTimer = null;
+  clearCars();
+}
+
+function startCurrentMode() {
+  if (viewMode === "cars") startCars();
+  else startHeatmap();
+}
+
+function stopCurrentMode() {
+  if (viewMode === "cars") stopCars();
+  else stopHeatmap();
+}
+
+function setMode(newMode) {
+  if (newMode === viewMode) return;
+
+  // stop current mode activity
+  stopCurrentMode();
+
+  if (newMode === "cars") {
+    // entering cars mode: hide heat overlay and remove car markers (fresh start)
+    hideHeatOverlay();
+    clearCars();
+  } else {
+    // entering heat mode: remove cars and show heat overlay (but only runs when started)
+    clearCars();
+    showHeatOverlay();         // so user immediately sees heat styling once started
+    // if you want overlay hidden until Start is pressed, comment the line above
+    // and rely on startHeatmap() to show it.
+    hideHeatOverlay();         // keep it hidden until user presses Start
+  }
+
+  viewMode = newMode;
+
+  const btn = document.getElementById("btn-toggle-sim");
+  if (btn) btn.textContent = "Start";
+
+  setStatus(`Mode: ${viewMode === "cars" ? "Cars" : "Heatmap"} (press Start)`);
 }
 
 // ======================
@@ -225,11 +430,41 @@ function initUI() {
   document.getElementById("btn-refresh").onclick = () =>
     loadRoads().catch(err => setStatus(`Road error: ${err.message}`));
 
-  // Reuse your existing toggle button, but it now toggles heatmap
+  // Start/Stop button now starts/stops whichever mode is selected
   document.getElementById("btn-toggle-sim").onclick = () => {
-    if (heatRunning) stopHeatmap();
-    else startHeatmap();
+    const running = (viewMode === "cars") ? carsRunning : heatRunning;
+    if (running) {
+      stopCurrentMode();
+      document.getElementById("btn-toggle-sim").textContent = "Start";
+      setStatus("Stopped.");
+    } else {
+      startCurrentMode();
+    }
   };
+
+  // Toggle switch from your HTML
+  const viewToggle = document.getElementById("viewToggle");
+  const viewLabel = document.getElementById("viewLabel");
+
+  if (viewToggle) {
+    // default: heatmap (unchecked)
+    viewToggle.checked = false;
+    if (viewLabel) viewLabel.textContent = "Heatmap";
+
+    // ensure heat overlay is hidden until Start is pressed
+    hideHeatOverlay();
+    setMode("heat");
+
+    viewToggle.onchange = () => {
+      if (viewToggle.checked) {
+        if (viewLabel) viewLabel.textContent = "Cars";
+        setMode("cars");
+      } else {
+        if (viewLabel) viewLabel.textContent = "Heatmap";
+        setMode("heat");
+      }
+    };
+  }
 }
 
 // ======================
@@ -239,4 +474,8 @@ window.addEventListener("load", async () => {
   initMap();
   initUI();
   await loadRoads().catch(err => setStatus(`Road load failed: ${err.message}`));
+
+  // start in heatmap mode but idle
+  hideHeatOverlay();
+  setStatus("Mode: Heatmap (press Start)");
 });
