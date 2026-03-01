@@ -1,5 +1,6 @@
 import random
 from shapely.geometry import LineString
+from collections import defaultdict
 
 # ============================
 # Global state
@@ -113,7 +114,8 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
                 "v": v,
                 "key": key,
                 "progress": random.random(),
-                "speed_kph": base_speed   # raw speed; multiplier applied at step time
+                "speed_kph": base_speed,   # raw speed; multiplier applied at step time
+                "current_speed_ms": base_speed / 3.6
             })
             vehicle_id += 1
 
@@ -163,200 +165,164 @@ def _point_on_edge(G, u, v, key, progress):
 # ============================
 def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0):
     """
-    Update vehicle positions in the city.
-    Features: directional traffic light phases (N-S vs E-W), queues, and delays.
+    Update vehicle positions using IDM for acceleration and 
+    maintaining existing intersection/queuing logic.
     """
     global initialized, current_vol_bin, current_spd_bin, vehicles, edge_queues, vehicle_delay, signal_timer
 
-    # Advance global signal timer
     signal_timer += float(dt)
 
-    # Re-initialize vehicles if volume OR speed changed between hours. (BUG FIX: was vol only)
     vol_bin = round(volume_multiplier, 2)
     spd_bin = round(speed_multiplier, 2)
     if not initialized or vol_bin != current_vol_bin or spd_bin != current_spd_bin:
         initialize_vehicles(G, volume_multiplier, speed_multiplier)
+        # Ensure new vehicles have a speed state
+        for v in vehicles:
+            if "current_speed_ms" not in v:
+                v["current_speed_ms"] = (v["speed_kph"] * speed_multiplier) / 3.6
         initialized = True
         current_vol_bin = vol_bin
         current_spd_bin = spd_bin
 
+    # 1. Group vehicles by edge and sort them so we know who is in front
+    edge_map = defaultdict(list)
+    for v in vehicles:
+        edge_map[(v["u"], v["v"], v["key"])].append(v)
+
     positions = []
 
-    for vehicle in vehicles:
-        edge_id = (vehicle["u"], vehicle["v"], vehicle["key"])
-    
-        if edge_id not in edge_queues:
-            edge_queues[edge_id] = []
+    # 2. Iterate through each road segment
+    for edge_id, road_vehicles in edge_map.items():
+        # Sort by progress (highest progress first = leader)
+        road_vehicles.sort(key=lambda x: x["progress"], reverse=True)
+        
+        u_orig, v_orig, key_orig = edge_id
+        edge_data = G[u_orig][v_orig][key_orig]
+        length_m = _edge_length_m(edge_data)
 
-        teleported_this_tick = False
+        for i, vehicle in enumerate(road_vehicles):
+            # Desired speed for this specific road
+            v0 = (vehicle["speed_kph"] * speed_multiplier) / 3.6
+            curr_v = vehicle.get("current_speed_ms", v0)
 
-        # speed_multiplier applied ONCE here at step time.
-        # vehicle["speed_kph"] is always raw base speed. (BUG FIX)
-        remaining_m = (vehicle["speed_kph"] * speed_multiplier) / 3.6 * SIMULATION_STEP_TIME
-
-        hops_left = 25  # safety to avoid infinite loops
-
-        while remaining_m > 0 and hops_left > 0:
-            hops_left -= 1
-
-            u, v, key = vehicle["u"], vehicle["v"], vehicle["key"]
-            edge_data = G[u][v][key]
-            length_m = _edge_length_m(edge_data)
-            dist_left_on_edge = (1.0 - vehicle["progress"]) * length_m
-
-            # Case 1: move along edge
-            if remaining_m < dist_left_on_edge:
-                vehicle["progress"] += remaining_m / length_m
-                remaining_m = 0
+            # Determine IDM acceleration based on car in front
+            if i == 0:
+                # No car in front on THIS edge. 
+                # (Intersection logic handles the "virtual stop" below)
+                accel = 1.5 * (1 - (curr_v / v0)**4)
             else:
-                # Vehicle reaches the end of the edge
-                remaining_m -= dist_left_on_edge
-                current_node = v
-                control = G.nodes[current_node].get("control", "none")
+                leader = road_vehicles[i-1]
+                # Distance between cars
+                gap = (leader["progress"] - vehicle["progress"]) * length_m - 4.0 # 4m car buffer
+                accel = get_idm_acceleration(curr_v, leader["current_speed_ms"], gap, v0)
 
-                # ===============================
-                # SIGNALIZED INTERSECTION
-                # ===============================
-                if control == "signal":
-                    is_green = is_green_for_edge(u, v, key, G, signal_timer)
-                    
-                    lanes = edge_data.get("lanes", 1)
-                    if isinstance(lanes, list): lanes = lanes[0]
-                    try:
-                        lanes = int(lanes)
-                    except (ValueError, TypeError):
-                        lanes = 1
+            # Update velocity and calculate how far the car wants to move
+            new_v = max(0, curr_v + accel * dt)
+            vehicle["current_speed_ms"] = new_v
+            # Displacement formula: d = vt + 0.5at^2
+            remaining_m = (curr_v * dt) + (0.5 * accel * (dt**2))
+            remaining_m = max(0, remaining_m)
 
-                    # Discharge logic
-                    discharge_rate = (SATURATION_FLOW_PER_LANE * lanes / 3600) * SIMULATION_STEP_TIME
+            # --- FROM HERE DOWN: Your original logic remains the same ---
+            if edge_id not in edge_queues:
+                edge_queues[edge_id] = []
 
-                    # Join queue if RED or if there's already a line
-                    if vehicle["id"] not in edge_queues[edge_id]:
-                        if not is_green or len(edge_queues[edge_id]) > 0:
-                            edge_queues[edge_id].append(vehicle["id"])
+            teleported_this_tick = False
+            hops_left = 25 
 
-                    # Process Queue
-                    if vehicle["id"] in edge_queues[edge_id]:
-                        queue = edge_queues[edge_id]
-                        position_in_queue = queue.index(vehicle["id"])
+            while remaining_m > 0 and hops_left > 0:
+                hops_left -= 1
+                u, v, key = vehicle["u"], vehicle["v"], vehicle["key"]
+                edge_data = G[u][v][key]
+                length_m = _edge_length_m(edge_data)
+                dist_left_on_edge = (1.0 - vehicle["progress"]) * length_m
 
-                        # Only proceed if GREEN and at the front of the line
-                        if is_green and position_in_queue < discharge_rate:
-                            queue.pop(position_in_queue)
-                        else:
-                            # HOLD AT INTERSECTION
-                            vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + SIMULATION_STEP_TIME
-                            vehicle["progress"] = 0.999
-                            remaining_m = 0 
-                            continue 
-                    else:
-                        # ===============================
-                        # Transition to next road (Weighted)
-                        # ===============================
-                        next_options = list(G.out_edges(current_node, keys=True, data=True))
-
-                        if next_options:
-                            # 1. Filter out the edge that goes back to where we just came from
-                            forward_options = [opt for opt in next_options if opt[1] != u]
-                            
-                            # If no forward options (dead end), use all options (turn around)
-                            choices = forward_options if forward_options else next_options
-                            
-                            # 2. Extract weights based on traffic_volume
-                            # Use a small floor (0.1) so low-volume roads still have a tiny chance
-                            weights = []
-                            for _, _, _, data in choices:
-                                vol = data.get("traffic_volume", 1)
-                                weights.append(max(0.1, float(vol)))
-
-                            # 3. Perform the weighted selection
-                            selected_edge = random.choices(choices, weights=weights, k=1)[0]
-                            new_u, new_v, new_key, _ = selected_edge
-                        else:
-                            # No out-edges: teleport to a random spot
-                            all_edges = list(G.edges(keys=True))
-                            new_u, new_v, new_key = random.choice(all_edges)
-                            teleported_this_tick = True
-                # ===============================
-                # PRIORITY INTERSECTION
-                # ===============================
-                elif control == "priority":
-                    # Only stop cars that are approaching from a MINOR road.
-                    # Cars coming from a MAJOR road should pass through without stopping.
-
-                    major_roads = {"primary", "secondary", "trunk"}
-
-                    incoming_highway = edge_data.get("highway", "residential")
-                    if isinstance(incoming_highway, list):
-                        incoming_highway = incoming_highway[0]
-                    incoming_highway = str(incoming_highway)
-
-                    coming_from_major = incoming_highway in major_roads
-
-                    if coming_from_major:
-                        # Major road has priority: do NOT stop here
-                        vehicle["stopped_at_node"] = False
-                        vehicle["stop_timer"] = 0.0
-                        next_options = list(G.out_edges(current_node, keys=True))
-                    else:
-                        # Side road must stop
-                        if not vehicle.get("stopped_at_node"):
-                            vehicle["stop_timer"] = 2.0
-                            vehicle["stopped_at_node"] = True
-
-                        if vehicle.get("stop_timer", 0.0) > 0.0:
-                            vehicle["stop_timer"] -= float(dt)
-                            vehicle["progress"] = 0.999
-                            remaining_m = 0.0
-                            vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0.0) + float(dt)
-                            continue
-                        else:
-                            vehicle["stopped_at_node"] = False
-                            next_options = list(G.out_edges(current_node, keys=True))
-
-                # FREE-FLOW: fall through with no delay
-
-                # ===============================
-                # Transition to next road
-                # (BUG FIX: removed duplicate next_options override that silently
-                #  discarded whatever signal/priority logic set above)
-                # ===============================
-                next_options = list(G.out_edges(current_node, keys=True))
-                
-                if next_options:
-                    # Filter out the edge that goes back to where we just came from
-                    forward_options = [opt for opt in next_options if opt[1] != u]
-
-                    if forward_options:
-                        new_u, new_v, new_key = random.choice(forward_options)
-                    else:
-                        # Dead end: turn around
-                        new_u, new_v, new_key = random.choice(next_options)
+                if remaining_m < dist_left_on_edge:
+                    vehicle["progress"] += remaining_m / length_m
+                    remaining_m = 0
                 else:
-                    # No out-edges: teleport to a random spot in the city
-                    all_edges = list(G.edges(keys=True))
-                    new_u, new_v, new_key = random.choice(all_edges)
-                    teleported_this_tick = True
+                    remaining_m -= dist_left_on_edge
+                    current_node = v
+                    control = G.nodes[current_node].get("control", "none")
 
-                vehicle["u"], vehicle["v"], vehicle["key"] = new_u, new_v, new_key
-                vehicle["progress"] = 0.0
-                edge_id = (new_u, new_v, new_key)
+                    if control == "signal":
+                        is_green = is_green_for_edge(u, v, key, G, signal_timer)
+                        lanes = edge_data.get("lanes", 1)
+                        if isinstance(lanes, list): lanes = lanes[0]
+                        try: lanes = int(lanes)
+                        except: lanes = 1
 
-                # Update speed for new edge — store raw base speed (no multiplier). (BUG FIX)
-                new_data = G[new_u][new_v][new_key]
-                new_speed = new_data.get("traffic_speed") or new_data.get("speed_kph", 30)
-                if isinstance(new_speed, list):
-                    new_speed = new_speed[0]
-                vehicle["speed_kph"] = float(new_speed)   # raw; multiplied at step time
+                        discharge_rate = (SATURATION_FLOW_PER_LANE * lanes / 3600) * float(dt)
 
-        # Final position calculation
-        lat, lon = _point_on_edge(G, vehicle["u"], vehicle["v"], vehicle["key"], vehicle["progress"])
-        positions.append({
-            "id": vehicle["id"],
-            "lat": lat,
-            "lon": lon,
-            "teleport": teleported_this_tick
-        })
+                        if vehicle["id"] not in edge_queues[edge_id]:
+                            if not is_green or len(edge_queues[edge_id]) > 0:
+                                edge_queues[edge_id].append(vehicle["id"])
+
+                        if vehicle["id"] in edge_queues[edge_id]:
+                            queue = edge_queues[edge_id]
+                            pos_in_q = queue.index(vehicle["id"])
+                            if is_green and pos_in_q < discharge_rate:
+                                queue.pop(pos_in_q)
+                            else:
+                                vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + float(dt)
+                                vehicle["progress"] = 0.999
+                                remaining_m = 0 
+                                vehicle["current_speed_ms"] = 0 # IDM reset
+                                continue 
+                        
+                    elif control == "priority":
+                        major_roads = {"primary", "secondary", "trunk"}
+                        incoming_highway = edge_data.get("highway", "residential")
+                        if isinstance(incoming_highway, list): incoming_highway = incoming_highway[0]
+                        coming_from_major = str(incoming_highway) in major_roads
+
+                        if coming_from_major:
+                            vehicle["stopped_at_node"] = False
+                            vehicle["stop_timer"] = 0.0
+                        else:
+                            if not vehicle.get("stopped_at_node"):
+                                vehicle["stop_timer"] = 2.0
+                                vehicle["stopped_at_node"] = True
+
+                            if vehicle.get("stop_timer", 0.0) > 0.0:
+                                vehicle["stop_timer"] -= float(dt)
+                                vehicle["progress"] = 0.999
+                                remaining_m = 0.0
+                                vehicle["current_speed_ms"] = 0 # IDM reset
+                                vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0.0) + float(dt)
+                                continue
+                            else:
+                                vehicle["stopped_at_node"] = False
+
+                    # Transition to next road
+                    next_options = list(G.out_edges(current_node, keys=True))
+                    if next_options:
+                        forward_options = [opt for opt in next_options if opt[1] != u]
+                        if forward_options:
+                            new_u, new_v, new_key = random.choice(forward_options)
+                        else:
+                            new_u, new_v, new_key = random.choice(next_options)
+                    else:
+                        all_edges = list(G.edges(keys=True))
+                        new_u, new_v, new_key = random.choice(all_edges)
+                        teleported_this_tick = True
+
+                    vehicle["u"], vehicle["v"], vehicle["key"] = new_u, new_v, new_key
+                    vehicle["progress"] = 0.0
+                    edge_id = (new_u, new_v, new_key)
+                    new_data = G[new_u][new_v][new_key]
+                    new_speed = new_data.get("traffic_speed") or new_data.get("speed_kph", 30)
+                    if isinstance(new_speed, list): new_speed = new_speed[0]
+                    vehicle["speed_kph"] = float(new_speed)
+
+            # Final position calculation
+            lat, lon = _point_on_edge(G, vehicle["u"], vehicle["v"], vehicle["key"], vehicle["progress"])
+            positions.append({
+                "id": vehicle["id"],
+                "lat": lat,
+                "lon": lon,
+                "teleport": teleported_this_tick
+            })
 
     return positions
 
@@ -546,3 +512,29 @@ def get_signal_states(G):
         })
 
     return out
+
+def get_idm_acceleration(v, v_lead, gap, v0):
+    """
+    Calculates acceleration based on IDM formula.
+    v: current speed (m/s)
+    v_lead: speed of car in front (m/s)
+    gap: distance to car in front (m)
+    v0: desired speed (m/s) based on speed_multiplier
+    """
+    # Parameters for realistic driving
+    a = 1.5       # Max acceleration m/s^2
+    b = 2.0       # Comfortable deceleration m/s^2
+    T = 1.5       # Desired time headway (s)
+    s0 = 2.0      # Minimum jam distance (m)
+    delta = 4.0   # Acceleration exponent
+    
+    # Safety check for collisions
+    if gap <= 0.1: return -b * 5 
+
+    delta_v = v - v_lead
+    # Desired gap s*
+    s_star = s0 + max(0, (v * T) + (v * delta_v) / (2 * (a * b)**0.5))
+    
+    # IDM Formula
+    acceleration = a * (1 - (v / v0)**delta - (s_star / gap)**2)
+    return acceleration
