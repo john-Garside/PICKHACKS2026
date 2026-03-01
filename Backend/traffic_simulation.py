@@ -313,7 +313,6 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
 
     return positions
 
-<<<<<<< HEAD
 
 
 #Find if traffic light is green for each direction
@@ -339,7 +338,6 @@ def is_green_for_edge(u, v, key, G, current_timer):
     else:
         # East-West is green for the second half of the cycle
         return cycle_pos >= (SIGNAL_CYCLE / 2)
-=======
 # ============================
 # Heatmap support (cars per road, normalized by lanes + road class)
 # ============================
@@ -423,4 +421,3 @@ def get_road_heat(G):
         "counts": counts,
         "heat": heat
     }
->>>>>>> 5653bcb523fd70215a2e397ae011359b49a866bd
