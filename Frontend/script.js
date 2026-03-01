@@ -10,6 +10,7 @@ const STOPS_ENDPOINT   = "/stops";      // 🛑 stop signs (priority intersectio
 const MULT_ENDPOINT    = "/multipliers"; // ⏱️ hour -> volume/speed multipliers
 const WAIT_STATS_ENDPOINT = "/wait-stats"; // 📊 signal wait data
 const SET_MODE_ENDPOINT   = "/set-signal-mode"; // 🤖 switch signal model
+const NODES_ENDPOINT      = "/nodes";      // 🔵 all intersection nodes
 
 // How often we update
 const HEAT_MS = 800;    // heatmap refresh
@@ -71,6 +72,9 @@ const signalMarkers = new Map();
 
 // 🛑 Store stop sign markers
 const stopMarkers = new Map();
+
+// 🔵 All-nodes hover layer
+let nodesLayer;
 
 // ======================
 // UTIL
@@ -168,7 +172,7 @@ async function refreshMultipliersUI() {
 // MAP INIT
 // ======================
 function initMap() {
-  map = L.map("map", { preferCanvas: true }).setView([37.951, -91.771], 14);
+  map = L.map("map", { preferCanvas: true, zoomControl: false }).setView([37.951, -91.771], 14);
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
@@ -191,6 +195,9 @@ function initMap() {
 
   // 🛑 Stop signs layer (can be toggled)
   stopsLayer = L.layerGroup().addTo(map);
+
+  // 🔵 Free-flow nodes hover layer (added last so it's on top, but only contains free-flow nodes)
+  nodesLayer = L.layerGroup().addTo(map);
 }
 
 // ======================
@@ -314,23 +321,12 @@ async function pollSignalsOnce() {
     if (!signalMarkers.has(id)) {
       const m = L.marker([lat, lon], { icon }).addTo(signalsLayer);
 
-      // Visible only while hovering
-      m.bindTooltip(`Signal ${id} • NS: ${s.ns} • EW: ${s.ew}`, {
-        direction: "top",
-        offset: [0, -14],
-        opacity: 0.95,
-        sticky: true
-      });
-
-      m.on("mouseover", () => m.openTooltip());
-      m.on("mouseout",  () => m.closeTooltip());
-
       signalMarkers.set(id, m);
     } else {
       const m = signalMarkers.get(id);
       m.setLatLng([lat, lon]);
       m.setIcon(icon);
-      m.setTooltipContent(`Signal ${id} • NS: ${s.ns} • EW: ${s.ew}`);
+
     }
   }
 
@@ -408,6 +404,96 @@ async function loadStopsOnce() {
 
     const m = L.marker([lat, lon], { icon }).addTo(stopsLayer);
     stopMarkers.set(id, m);
+  }
+}
+
+// ======================
+// 🔵 ALL-NODES CLICK POPUP LAYER
+// ======================
+
+// Custom click popup — one shared div, shown near the click position
+const nodePopup = document.createElement("div");
+nodePopup.id = "node-popup";
+nodePopup.style.cssText = [
+  "position:fixed",
+  "z-index:9999",
+  "pointer-events:none",
+  "display:none",
+  "background:rgba(15,15,25,0.93)",
+  "color:#e8e8f0",
+  "border:1px solid rgba(255,255,255,0.13)",
+  "border-radius:9px",
+  "padding:8px 13px",
+  "font:13px/1.5 system-ui,sans-serif",
+  "box-shadow:0 4px 18px rgba(0,0,0,0.45)",
+  "white-space:nowrap",
+  "max-width:260px",
+].join(";");
+document.body.appendChild(nodePopup);
+
+function showNodePopup(html, mouseEvent) {
+  nodePopup.innerHTML = html;
+  nodePopup.style.display = "block";
+  positionNodePopup(mouseEvent);
+}
+
+function positionNodePopup(e) {
+  const pad = 14;
+  const pw  = nodePopup.offsetWidth  || 200;
+  const ph  = nodePopup.offsetHeight || 60;
+  let x = e.clientX + pad;
+  let y = e.clientY - ph / 2;
+  if (x + pw > window.innerWidth  - pad) x = e.clientX - pw - pad;
+  if (y < pad)                           y = pad;
+  if (y + ph > window.innerHeight - pad) y = window.innerHeight - ph - pad;
+  nodePopup.style.left = x + "px";
+  nodePopup.style.top  = y + "px";
+}
+
+function hideNodePopup() {
+  nodePopup.style.display = "none";
+}
+
+// Dismiss popup on map click (not on a node)
+document.addEventListener("click", (e) => {
+  if (!e._fromNode) hideNodePopup();
+});
+
+async function loadNodesOnce() {
+  const list = await fetchJSON(NODES_ENDPOINT);
+  nodesLayer.clearLayers();
+
+  for (const n of (list ?? [])) {
+    const id      = String(n.id);
+    const lat     = Number(n.lat);
+    const lon     = Number(n.lon);
+    const control = n.control ?? "none";
+    const degree  = n.degree  ?? 0;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+    const typeLabel = control === "signal"
+      ? "🚦 Signalized Intersection"
+      : control === "priority"
+        ? "🛑 Stop / Yield Intersection"
+        : "⬤ Free-Flow Intersection";
+
+    // Larger radius so it is easy to click; fully invisible
+    const m = L.circleMarker([lat, lon], {
+      radius: 22,
+      color: "transparent",
+      fillColor: "transparent",
+      fillOpacity: 0,
+      weight: 0,
+      renderer: canvasRenderer,
+      interactive: true,
+    }).addTo(nodesLayer);
+
+    m.on("click", (e) => {
+      e.originalEvent._fromNode = true;
+      const html = `<b>${typeLabel}</b><br>`
+        + `<span style="opacity:0.6;font-size:11px">Roads: ${degree} &nbsp;|&nbsp; ID ${id}</span>`;
+      showNodePopup(html, e.originalEvent);
+    });
   }
 }
 
@@ -674,11 +760,8 @@ function initUI() {
   if (lightsToggle) {
     lightsToggle.checked = true;
     lightsToggle.addEventListener("change", () => {
-      for (const m of signalMarkers.values()) m.closeTooltip();
-
       if (lightsToggle.checked) {
         map.addLayer(signalsLayer);
-        for (const m of signalMarkers.values()) m.closeTooltip();
       } else {
         map.removeLayer(signalsLayer);
       }
@@ -711,6 +794,16 @@ function initUI() {
       collapseBtn.title = isCollapsed ? "Show panel" : "Hide panel";
     });
   }
+
+  // ⏱️ time controls collapse/expand
+  const timeCollapseBtn = document.getElementById("btn-time-collapse");
+  const timePanel       = document.getElementById("time-controls");
+  if (timeCollapseBtn && timePanel) {
+    timeCollapseBtn.addEventListener("click", () => {
+      const isCollapsed = timePanel.classList.toggle("collapsed");
+      timeCollapseBtn.title = isCollapsed ? "Show panel" : "Hide panel";
+    });
+  }
 }
 
 // ======================
@@ -724,6 +817,9 @@ window.addEventListener("load", async () => {
 
   // 🛑 load stop signs once (static)
   await loadStopsOnce().catch(err => console.warn("Stops error:", err));
+
+  // 🔵 load all intersection nodes for hover tooltips
+  await loadNodesOnce().catch(err => console.warn("Nodes error:", err));
 
   hideHeatOverlay();
   setStatus("Mode: Heatmap (press Start)");

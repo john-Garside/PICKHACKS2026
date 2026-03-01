@@ -143,6 +143,30 @@ def stops():
         })
     return jsonify(out)
 
+
+@app.route('/nodes', methods=['GET'])
+def nodes():
+    """Return all intersection nodes with their control type for hover tooltips."""
+    out = []
+    for node_id, data in G.nodes(data=True):
+        control = data.get('control', 'none')
+        x = data.get('x')
+        y = data.get('y')
+        if x is None or y is None:
+            continue
+        degree = G.degree(node_id)
+        # Only return actual intersections (degree >= 3) plus signals/priority
+        if degree < 3 and control == 'none':
+            continue
+        out.append({
+            'id': str(node_id),
+            'lat': float(y),
+            'lon': float(x),
+            'control': control,
+            'degree': degree
+        })
+    return jsonify(out)
+
 @app.route("/multipliers", methods=["GET"])
 def multipliers():
     hour = int(request.args.get("hour", 12))
