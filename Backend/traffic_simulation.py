@@ -189,14 +189,10 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
             edge_queues[edge_id] = []
 
         teleported_this_tick = False
-<<<<<<< HEAD
 
         # speed_multiplier applied ONCE here at step time.
         # vehicle["speed_kph"] is always raw base speed. (BUG FIX)
         remaining_m = (vehicle["speed_kph"] * speed_multiplier) / 3.6 * SIMULATION_STEP_TIME
-=======
-        remaining_m = (vehicle["speed_kph"] * speed_multiplier) / 3.6 * float(dt)
->>>>>>> 26356590ec19be021933143668cd25079ccd3b19
 
         hops_left = 25  # safety to avoid infinite loops
 
@@ -251,18 +247,12 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
                             # HOLD AT INTERSECTION
                             vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + SIMULATION_STEP_TIME
                             vehicle["progress"] = 0.999
-<<<<<<< HEAD
-                            remaining_m = 0
-                            continue
-
-=======
                             remaining_m = 0 
                             continue 
                     else:
                         # Light is green and no queue, proceed normally
                         next_options = list(G.out_edges(current_node, keys=True))
                 
->>>>>>> 26356590ec19be021933143668cd25079ccd3b19
                 # ===============================
                 # PRIORITY INTERSECTION
                 # ===============================
@@ -282,8 +272,6 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
                     if coming_from_major:
                         # Major road has priority: do NOT stop here
                         vehicle["stopped_at_node"] = False
-<<<<<<< HEAD
-=======
                         vehicle["stop_timer"] = 0.0
                         next_options = list(G.out_edges(current_node, keys=True))
                     else:
@@ -301,7 +289,6 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
                         else:
                             vehicle["stopped_at_node"] = False
                             next_options = list(G.out_edges(current_node, keys=True))
->>>>>>> 26356590ec19be021933143668cd25079ccd3b19
 
                 # FREE-FLOW: fall through with no delay
 
@@ -313,25 +300,16 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
                 next_options = list(G.out_edges(current_node, keys=True))
                 
                 if next_options:
-<<<<<<< HEAD
                     # Filter out the edge that goes back to where we just came from
-=======
-                    # Filter out the edge that goes back to where we just came from (u)
->>>>>>> 26356590ec19be021933143668cd25079ccd3b19
                     forward_options = [opt for opt in next_options if opt[1] != u]
 
                     if forward_options:
                         new_u, new_v, new_key = random.choice(forward_options)
                     else:
-<<<<<<< HEAD
                         # Dead end: turn around
                         new_u, new_v, new_key = random.choice(next_options)
                 else:
                     # No out-edges: teleport to a random spot in the city
-=======
-                        new_u, new_v, new_key = random.choice(next_options)
-                else:
->>>>>>> 26356590ec19be021933143668cd25079ccd3b19
                     all_edges = list(G.edges(keys=True))
                     new_u, new_v, new_key = random.choice(all_edges)
                     teleported_this_tick = True
@@ -373,12 +351,8 @@ def is_green_for_edge(u, v, key, G, current_timer):
     # Determine if the incoming road (u -> v) is North-South or East-West
     u_data = G.nodes[u]
     v_data = G.nodes[v]
-<<<<<<< HEAD
-
-=======
     
     # Calculate delta y vs delta x to find orientation
->>>>>>> 26356590ec19be021933143668cd25079ccd3b19
     is_north_south = abs(u_data['y'] - v_data['y']) > abs(u_data['x'] - v_data['x'])
     
     if is_north_south:
@@ -386,7 +360,6 @@ def is_green_for_edge(u, v, key, G, current_timer):
     else:
         return cycle_pos >= (SIGNAL_CYCLE / 2)
 
-<<<<<<< HEAD
 
 # ============================
 # Traffic light state export (for UI)
@@ -419,8 +392,6 @@ def get_signal_states(G):
     return signals
 
 
-=======
->>>>>>> 26356590ec19be021933143668cd25079ccd3b19
 # ============================
 # Heatmap support (cars per road, normalized by lanes + road class)
 # ============================
