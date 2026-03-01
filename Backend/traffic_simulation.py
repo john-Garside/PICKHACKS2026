@@ -6,7 +6,8 @@ from shapely.geometry import LineString
 # ============================
 vehicles = []
 initialized = False
-current_vol_bin = -1  # Tracks if we need to re-spawn cars due to density changes
+current_vol_bin = -1   # tracks volume_multiplier for re-spawn
+current_spd_bin = -1   # tracks speed_multiplier for re-spawn (BUG FIX: was missing)
 
 # Intersection state
 edge_queues = {}         # { (u,v,key): [vehicle_ids...] }
@@ -18,11 +19,6 @@ SATURATION_FLOW_PER_LANE = 1900  # vehicles per hour per lane
 
 # Simulation parameters
 SIMULATION_STEP_TIME = 1.0
-VOLUME_DENSITY_FACTOR = 500  # used for initial vehicle spawn
-
-
-# Adjust this to change overall car density (Higher = fewer cars)
-VOLUME_DENSITY_FACTOR = 500
 
 # Heat normalization: capacity multipliers by road type
 HIGHWAY_CAPACITY = {
@@ -54,6 +50,10 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
     - GeoJSON traffic_volume for spatial weighting
     - Hourly demand multiplier (volume_multiplier)
     - Hourly speed multiplier (speed_multiplier)
+
+    NOTE: vehicles store the RAW base speed here.
+          The speed_multiplier is applied in the simulation step only,
+          so it is never applied twice. (BUG FIX)
     """
     global vehicles
     vehicles = []
@@ -80,11 +80,15 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
         print("No traffic weights available.")
         return
 
-    # 2) Determine total city cars
-    BASE_CITY_CARS = 1200  # baseline population
-    MAX_CITY_CARS = int(BASE_CITY_CARS * float(volume_multiplier))
+    # 2) Determine total city cars.
+    #    Rolla population ~20k; even at 3am there are meaningful vehicles present.
+    #    A floor of 0.15 prevents the city from going nearly empty off-peak. (BUG FIX)
+    BASE_CITY_CARS = 1200
+    DEMAND_FLOOR = 0.15
+    effective_multiplier = max(DEMAND_FLOOR, float(volume_multiplier))
+    MAX_CITY_CARS = max(1, int(BASE_CITY_CARS * effective_multiplier))
 
-    print(f"Spawning {MAX_CITY_CARS} vehicles for this hour.")
+    print(f"Spawning {MAX_CITY_CARS} vehicles for this hour (vol_mult={volume_multiplier:.2f}).")
 
     # 3) Distribute proportionally
     for u, v, key, data, adjusted_volume in edges_data:
@@ -94,12 +98,13 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
         if num_to_spawn <= 0:
             continue
 
+        # Store the RAW base speed — do NOT multiply by speed_multiplier here.
+        # The step loop applies speed_multiplier at move time, so it stays consistent
+        # across edge hops and hour changes without requiring re-spawning. (BUG FIX)
         base_speed = data.get("traffic_speed") or data.get("speed_kph", 30)
         if isinstance(base_speed, list):
             base_speed = base_speed[0]
-
-        # Apply hourly speed multiplier once at spawn time
-        effective_speed = float(base_speed) * float(speed_multiplier)
+        base_speed = float(base_speed)
 
         for _ in range(num_to_spawn):
             vehicles.append({
@@ -108,7 +113,7 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
                 "v": v,
                 "key": key,
                 "progress": random.random(),
-                "speed_kph": effective_speed
+                "speed_kph": base_speed   # raw speed; multiplier applied at step time
             })
             vehicle_id += 1
 
@@ -161,17 +166,19 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
     Update vehicle positions in the city.
     Features: directional traffic light phases (N-S vs E-W), queues, and delays.
     """
-    global initialized, current_vol_bin, vehicles, edge_queues, vehicle_delay, signal_timer
+    global initialized, current_vol_bin, current_spd_bin, vehicles, edge_queues, vehicle_delay, signal_timer
 
     # Advance global signal timer
     signal_timer += SIMULATION_STEP_TIME
 
-    # Re-initialize vehicles if volume changed
-    vol_bin = round(volume_multiplier, 1)
-    if not initialized or vol_bin != current_vol_bin:
+    # Re-initialize vehicles if volume OR speed changed between hours. (BUG FIX: was vol only)
+    vol_bin = round(volume_multiplier, 2)
+    spd_bin = round(speed_multiplier, 2)
+    if not initialized or vol_bin != current_vol_bin or spd_bin != current_spd_bin:
         initialize_vehicles(G, volume_multiplier, speed_multiplier)
         initialized = True
         current_vol_bin = vol_bin
+        current_spd_bin = spd_bin
 
     positions = []
 
@@ -182,6 +189,9 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
             edge_queues[edge_id] = []
 
         teleported_this_tick = False
+
+        # speed_multiplier applied ONCE here at step time.
+        # vehicle["speed_kph"] is always raw base speed. (BUG FIX)
         remaining_m = (vehicle["speed_kph"] * speed_multiplier) / 3.6 * SIMULATION_STEP_TIME
 
         hops_left = 25  # safety to avoid infinite loops
@@ -205,10 +215,9 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                 control = G.nodes[current_node].get("control", "none")
 
                 # ===============================
-                # SIGNALIZED INTERSECTION (FIXED)
+                # SIGNALIZED INTERSECTION
                 # ===============================
                 if control == "signal":
-                    # Check directional green light
                     is_green = is_green_for_edge(u, v, key, G, signal_timer)
 
                     lanes = edge_data.get("lanes", 1)
@@ -221,12 +230,12 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                     # Discharge logic
                     discharge_rate = (SATURATION_FLOW_PER_LANE * lanes / 3600) * SIMULATION_STEP_TIME
 
-                    # 1. Join queue if RED or if there's already a line
+                    # Join queue if RED or if there's already a line
                     if vehicle["id"] not in edge_queues[edge_id]:
                         if not is_green or len(edge_queues[edge_id]) > 0:
                             edge_queues[edge_id].append(vehicle["id"])
 
-                    # 2. Process Queue
+                    # Process Queue
                     if vehicle["id"] in edge_queues[edge_id]:
                         queue = edge_queues[edge_id]
                         position_in_queue = queue.index(vehicle["id"])
@@ -234,16 +243,12 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                         # Only proceed if GREEN and at the front of the line
                         if is_green and position_in_queue < discharge_rate:
                             queue.pop(position_in_queue)
-                            next_options = list(G.out_edges(current_node, keys=True))
                         else:
                             # HOLD AT INTERSECTION
                             vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + SIMULATION_STEP_TIME
                             vehicle["progress"] = 0.999
                             remaining_m = 0
                             continue
-                    else:
-                        # Light is green and no queue, proceed normally
-                        next_options = list(G.out_edges(current_node, keys=True))
 
                 # ===============================
                 # PRIORITY INTERSECTION
@@ -261,46 +266,41 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                         continue
                     else:
                         vehicle["stopped_at_node"] = False
-                        next_options = list(G.out_edges(current_node, keys=True))
 
-                # ===============================
-                # FREE-FLOW INTERSECTION
-                # ===============================
-                else:
-                    next_options = list(G.out_edges(current_node, keys=True))
+                # FREE-FLOW: fall through with no delay
 
                 # ===============================
                 # Transition to next road
+                # (BUG FIX: removed duplicate next_options override that silently
+                #  discarded whatever signal/priority logic set above)
                 # ===============================
                 next_options = list(G.out_edges(current_node, keys=True))
 
                 if next_options:
-                    # Filter out the edge that goes back to where we just came from (u)
-                    # next_option format is (v, next_node, key)
+                    # Filter out the edge that goes back to where we just came from
                     forward_options = [opt for opt in next_options if opt[1] != u]
 
                     if forward_options:
-                        # Normal intersection: go forward, left, or right
                         new_u, new_v, new_key = random.choice(forward_options)
                     else:
-                        # Dead end: the only option is to turn around
+                        # Dead end: turn around
                         new_u, new_v, new_key = random.choice(next_options)
                 else:
-                    # No out-edges at all: teleport to a random spot in the city
+                    # No out-edges: teleport to a random spot in the city
                     all_edges = list(G.edges(keys=True))
                     new_u, new_v, new_key = random.choice(all_edges)
                     teleported_this_tick = True
 
                 vehicle["u"], vehicle["v"], vehicle["key"] = new_u, new_v, new_key
                 vehicle["progress"] = 0.0
-                edge_id = (new_u, new_v, new_key)  # Update edge_id for the next loop/queue check
+                edge_id = (new_u, new_v, new_key)
 
-                # update speed for new edge
+                # Update speed for new edge — store raw base speed (no multiplier). (BUG FIX)
                 new_data = G[new_u][new_v][new_key]
                 new_speed = new_data.get("traffic_speed") or new_data.get("speed_kph", 30)
                 if isinstance(new_speed, list):
                     new_speed = new_speed[0]
-                vehicle["speed_kph"] = float(new_speed)
+                vehicle["speed_kph"] = float(new_speed)   # raw; multiplied at step time
 
         # Final position calculation
         lat, lon = _point_on_edge(G, vehicle["u"], vehicle["v"], vehicle["key"], vehicle["progress"])
@@ -328,25 +328,22 @@ def is_green_for_edge(u, v, key, G, current_timer):
     u_data = G.nodes[u]
     v_data = G.nodes[v]
 
-    # Calculate delta y vs delta x to find orientation
     is_north_south = abs(u_data['y'] - v_data['y']) > abs(u_data['x'] - v_data['x'])
 
     if is_north_south:
-        # North-South is green for the first half of the cycle
         return cycle_pos < (SIGNAL_CYCLE / 2)
     else:
-        # East-West is green for the second half of the cycle
         return cycle_pos >= (SIGNAL_CYCLE / 2)
 
 
 # ============================
-# 🚦 Traffic light state export (for UI)
+# Traffic light state export (for UI)
 # ============================
 def get_signal_states(G):
     """
     Returns a list of signalized intersections with current phase.
-    We treat the cycle as two phases:
-      - first half: North/South green, East/West red
+    Two phases:
+      - first half:  North/South green, East/West red
       - second half: East/West green, North/South red
     """
     global signal_timer
@@ -373,7 +370,6 @@ def get_signal_states(G):
 # ============================
 # Heatmap support (cars per road, normalized by lanes + road class)
 # ============================
-# Rolla-tuned capacity multipliers
 ROAD_CLASS_CAP = {
     "motorway": 10.0,
     "motorway_link": 8.0,
@@ -401,7 +397,7 @@ def get_road_heat(G):
     }
     """
 
-    # 1️⃣ Count vehicles per directed edge
+    # 1) Count vehicles per directed edge
     counts = {}
     for veh in vehicles:
         edge_id = f'{veh["u"]}-{veh["v"]}'
@@ -420,7 +416,7 @@ def get_road_heat(G):
             lanes = lanes[0]
         try:
             lanes = max(1, int(lanes))
-        except:
+        except Exception:
             lanes = 1
 
         # --- road type ---
@@ -433,7 +429,7 @@ def get_road_heat(G):
         # --- edge length in meters ---
         try:
             length_m = float(data.get("length", 100))
-        except:
+        except Exception:
             length_m = 100
 
         length_factor = max(0.5, length_m / 100.0)

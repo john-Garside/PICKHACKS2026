@@ -17,20 +17,19 @@ df['Time'] = pd.to_datetime(df['Time'])
 df['hour'] = df['Time'].dt.hour
 
 hourly_speeds = df.groupby('hour')['Speed [kmh]'].mean()
-overall_avg_speed = hourly_speeds.mean()
+hourly_freeflow = df.groupby('hour')['Free flow speed [kmh]'].mean()
+hourly_congestion = df.groupby('hour')['Congestion level [%]'].mean()
+peak_congestion = hourly_congestion.max()
 
-# Demand increases when speeds drop
 demand_multipliers = {
-    hour: overall_avg_speed / hourly_speeds[hour]
-    for hour in hourly_speeds.index
+    hour: hourly_congestion[hour] / peak_congestion
+    for hour in hourly_congestion.index
 }
 
-# Speed scales relative to overall average
 speed_multipliers = {
-    hour: hourly_speeds[hour] / overall_avg_speed
+    hour: hourly_speeds[hour] / hourly_freeflow[hour]
     for hour in hourly_speeds.index
 }
-
 # ============================
 # Load Network
 # ============================
