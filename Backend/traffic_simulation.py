@@ -256,9 +256,21 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                 # ===============================
                 # Transition to next road
                 # ===============================
+                next_options = list(G.out_edges(current_node, keys=True))
+                
                 if next_options:
-                    new_u, new_v, new_key = random.choice(next_options)
+                    # Filter out the edge that goes back to where we just came from (u)
+                    # next_option format is (v, next_node, key)
+                    forward_options = [opt for opt in next_options if opt[1] != u]
+
+                    if forward_options:
+                        # Normal intersection: go forward, left, or right
+                        new_u, new_v, new_key = random.choice(forward_options)
+                    else:
+                        # Dead end: the only option is to turn around
+                        new_u, new_v, new_key = random.choice(next_options)
                 else:
+                    # No out-edges at all: teleport to a random spot in the city
                     all_edges = list(G.edges(keys=True))
                     new_u, new_v, new_key = random.choice(all_edges)
                     teleported_this_tick = True
