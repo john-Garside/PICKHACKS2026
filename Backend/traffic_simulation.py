@@ -1,6 +1,21 @@
+"""
+traffic_simulation.py
+---------------------
+Handles vehicle spawning, movement, intersection queuing, and road heat.
+
+Signal logic is delegated to signal_model.py.
+Wait-time reporting is handled by wait_report.py.
+"""
+
+import json
+import os
 import random
 from shapely.geometry import LineString
 from collections import defaultdict
+
+import signal_model
+
+WAIT_STATS_PATH = os.path.join(os.path.dirname(__file__), "wait_stats.json")
 
 # ============================
 # Global state
@@ -12,33 +27,40 @@ initialized = False
 current_vol_bin = -1   # tracks volume_multiplier for re-spawn
 current_spd_bin = -1   # tracks speed_multiplier for re-spawn (BUG FIX: was missing)
 
-# Intersection state
-edge_queues = {}         # { (u,v,key): [vehicle_ids...] }
-vehicle_delay = {}       # { vehicle_id: seconds }
-signal_timer = 0         # global simulation timer
-SIGNAL_CYCLE = 60        # total cycle seconds
-GREEN_DURATION = 30      # seconds green
-SATURATION_FLOW_PER_LANE = 1900  # vehicles per hour per lane
+edge_queues   = {}    # { (u,v,key): [vehicle_ids...] }
+vehicle_delay = {}    # { vehicle_id: cumulative delay seconds }
+signal_timer  = 0.0   # global simulation clock (seconds)
 
-# Simulation parameters
-SIMULATION_STEP_TIME = 1.0
+SIGNAL_CYCLE             = signal_model.DEFAULT_CYCLE
+SATURATION_FLOW_PER_LANE = 1900
+SIMULATION_STEP_TIME     = 1.0
+VOLUME_DENSITY_FACTOR    = 500
 
-# Heat normalization: capacity multipliers by road type
-HIGHWAY_CAPACITY = {
-    "motorway": 6.0,
-    "motorway_link": 5.0,
-    "trunk": 5.0,
-    "trunk_link": 4.0,
-    "primary": 3.5,
-    "primary_link": 3.0,
-    "secondary": 2.5,
-    "secondary_link": 2.2,
-    "tertiary": 2.0,
-    "residential": 1.3,
-    "living_street": 1.1,
-    "service": 1.0,
-    "unclassified": 1.4,
-    "road": 1.2,
+# ============================
+# Wait-time stats
+# Written here; read by wait_report.py
+# { node_id: { "total": float, "count": int, "max": float } }
+# ============================
+node_wait_stats: dict = {}
+
+# ============================
+# Road capacity table
+# ============================
+ROAD_CLASS_CAP = {
+    "motorway":       10.0,
+    "motorway_link":   8.0,
+    "trunk":           7.0,
+    "trunk_link":      6.0,
+    "primary":         5.0,
+    "primary_link":    4.5,
+    "secondary":       3.5,
+    "secondary_link":  3.0,
+    "tertiary":        2.7,
+    "tertiary_link":   2.4,
+    "residential":     1.8,
+    "unclassified":    2.0,
+    "service":         1.2,
+    "living_street":   1.0,
 }
 
 
@@ -59,19 +81,19 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
           so it is never applied twice. (BUG FIX)
     """
     global vehicles
+
     vehicles = []
     edge_queues = {}
     vehicle_delay = {}
     vehicle_id = 0
+    node_wait_stats.clear()
+    signal_model.reset()
 
-    # 1) Collect edge weights
-    edges_data = []
+    edges_data   = []
     total_weight = 0.0
 
     for u, v, key, data in G.edges(keys=True, data=True):
         base_volume = data.get("traffic_volume", 0)
-
-        # If no probe data, give very small baseline
         if base_volume <= 0:
             base_volume = 0.01
 
@@ -124,15 +146,14 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
 
 
 # ============================
-# Helper functions
+# Helpers
 # ============================
-def _edge_length_m(edge_data):
+def _edge_length_m(edge_data) -> float:
     """Use OSMnx 'length' attribute (meters) for consistent physics."""
     try:
-        length = float(edge_data.get("length", 10.0))
+        return max(1.0, float(edge_data.get("length", 10.0)))
     except Exception:
-        length = 10.0
-    return max(1.0, length)
+        return 10.0
 
 
 def _point_on_edge(G, u, v, key, progress):
@@ -141,8 +162,8 @@ def _point_on_edge(G, u, v, key, progress):
     Uses geometry if present (curved roads), else interpolates node-to-node.
     """
     edge_data = G[u][v][key]
-    geom = edge_data.get("geometry", None)
-    p = max(0.0, min(1.0, float(progress)))
+    geom = edge_data.get("geometry")
+    p    = max(0.0, min(1.0, float(progress)))
 
     if geom is not None:
         try:
@@ -154,11 +175,32 @@ def _point_on_edge(G, u, v, key, progress):
         except Exception:
             pass
 
-    u_node = G.nodes[u]
-    v_node = G.nodes[v]
-    lat = u_node["y"] + p * (v_node["y"] - u_node["y"])
-    lon = u_node["x"] + p * (v_node["x"] - u_node["x"])
-    return lat, lon
+    u_n = G.nodes[u]
+    v_n = G.nodes[v]
+    return (
+        u_n["y"] + p * (v_n["y"] - u_n["y"]),
+        u_n["x"] + p * (v_n["x"] - u_n["x"]),
+    )
+
+
+def _end_wait(vehicle_id: int):
+    """
+    Release a vehicle from its signal wait.
+    Retrieves wait duration from signal_model and stores it in node_wait_stats.
+    """
+    entry = signal_model._vehicle_wait_start.get(vehicle_id)
+    if entry is None:
+        return
+    node_id = entry[0]
+
+    wait_s = signal_model.record_wait_end(vehicle_id, signal_timer)
+    if wait_s is None or wait_s <= 0:
+        return
+
+    stats = node_wait_stats.setdefault(node_id, {"total": 0.0, "count": 0, "max": 0.0})
+    stats["total"] += wait_s
+    stats["count"] += 1
+    stats["max"]    = max(stats["max"], wait_s)
 
 
 # ============================
@@ -348,105 +390,45 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
     return positions
 
 
-
-#Find if traffic light is green for each direction
-def is_green_for_edge(u, v, key, G, current_timer):
-    node_data = G.nodes[v]
-    if node_data.get("control") != "signal":
-        return True # Not a signalized intersection
-    
-    # Calculate cycle position
-    cycle_pos = current_timer % SIGNAL_CYCLE
-    
-    # Simple Phase Logic: 
-    # Determine if the incoming road (u -> v) is North-South or East-West
-    u_data = G.nodes[u]
-    v_data = G.nodes[v]
-    
-    # Calculate delta y vs delta x to find orientation
-    is_north_south = abs(u_data['y'] - v_data['y']) > abs(u_data['x'] - v_data['x'])
-    
-    if is_north_south:
-        return cycle_pos < (SIGNAL_CYCLE / 2)
-    else:
-        return cycle_pos >= (SIGNAL_CYCLE / 2)
+def _flush_wait_stats():
+    """Write node_wait_stats + signal_model state to wait_stats.json for wait_report.py."""
+    try:
+        payload = {
+            "sim_time":    signal_timer,
+            "signal_mode": signal_model.SIGNAL_MODE,
+            "rl_updates":  len(signal_model.update_log),
+            "node_splits": {str(k): v for k, v in signal_model.node_ns_split.items()},
+            "node_cycles": {str(k): v for k, v in signal_model.node_cycle.items()},
+            "wait_stats":  {str(k): v for k, v in node_wait_stats.items()},
+        }
+        tmp = WAIT_STATS_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, WAIT_STATS_PATH)
+    except Exception:
+        pass  # never let reporting crash the simulation
 
 
 # ============================
-# Traffic light state export (for UI)
+# Road heatmap
 # ============================
-def get_signal_states(G):
-    """
-    Returns a list of signalized intersections with current phase.
-    Two phases:
-      - first half:  North/South green, East/West red
-      - second half: East/West green, North/South red
-    """
-    global signal_timer
-
-    cycle_pos = signal_timer % SIGNAL_CYCLE
-    ns_green = cycle_pos < (SIGNAL_CYCLE / 2)
-    ew_green = not ns_green
-
-    signals = []
-    for node, data in G.nodes(data=True):
-        if data.get("control") == "signal":
-            signals.append({
-                "id": node,
-                "lat": float(data["y"]),
-                "lon": float(data["x"]),
-                "ns": "green" if ns_green else "red",
-                "ew": "green" if ew_green else "red",
-                "cycle_pos": float(cycle_pos),
-                "cycle_len": float(SIGNAL_CYCLE),
-            })
-    return signals
-
-
-# ============================
-# Heatmap support (cars per road, normalized by lanes + road class)
-# ============================
-ROAD_CLASS_CAP = {
-    "motorway": 10.0,
-    "motorway_link": 8.0,
-    "trunk": 7.0,
-    "trunk_link": 6.0,
-    "primary": 5.0,
-    "primary_link": 4.5,
-    "secondary": 3.5,
-    "secondary_link": 3.0,
-    "tertiary": 2.7,
-    "tertiary_link": 2.4,
-    "residential": 1.8,
-    "unclassified": 2.0,
-    "service": 1.2,
-    "living_street": 1.0,
-}
-
-
 def get_road_heat(G):
     """
     Returns:
     {
         "counts": {edge_id: car_count},
-        "heat": {edge_id: 0..1.5+ congestion ratio}
+        "heat":   {edge_id: 0..1.5+ congestion ratio}
     }
     """
-
-    # 1) Count vehicles per directed edge
     counts = {}
     for veh in vehicles:
-        edge_id = f'{veh["u"]}-{veh["v"]}'
-        counts[edge_id] = counts.get(edge_id, 0) + 1
+        eid = f'{veh["u"]}-{veh["v"]}'
+        counts[eid] = counts.get(eid, 0) + 1
 
     heat = {}
-
     for u, v, key, data in G.edges(keys=True, data=True):
+        eid = f"{u}-{v}"
 
-        edge_id = f"{u}-{v}"
-        car_count = counts.get(edge_id, 0)
-
-        # --- lanes ---
         lanes = data.get("lanes", 1)
         if isinstance(lanes, list):
             lanes = lanes[0]
@@ -455,81 +437,71 @@ def get_road_heat(G):
         except Exception:
             lanes = 1
 
-        # --- road type ---
         highway = data.get("highway", "residential")
         if isinstance(highway, list):
             highway = highway[0]
 
-        road_multiplier = ROAD_CLASS_CAP.get(str(highway), 2.0)
-
-        # --- edge length in meters ---
+        road_mult = ROAD_CLASS_CAP.get(str(highway), 2.0)
         try:
             length_m = float(data.get("length", 100))
         except Exception:
-            length_m = 100
+            length_m = 100.0
 
         length_factor = max(0.5, length_m / 100.0)
+        capacity      = lanes * road_mult * length_factor
+        car_count     = counts.get(eid, 0)
+        heat[eid]     = (car_count / capacity) if capacity > 0 else 0
 
-        # --- final capacity ---
-        capacity = lanes * road_multiplier * length_factor
-
-        # --- congestion ratio ---
-        if capacity <= 0:
-            heat_ratio = 0
-        else:
-            heat_ratio = car_count / capacity
-
-        heat[edge_id] = heat_ratio
-
-    return {
-        "counts": counts,
-        "heat": heat
-    }
+    return {"counts": counts, "heat": heat}
 
 
 # ============================
-# Signal state export (for UI)
+# Traffic light state export (for UI)
 # ============================
 def get_signal_states(G):
-    """Return traffic-signal marker data for the frontend.
+    """
+    Returns a list of signalized intersections with current phase.
+
+    Two phases:
+      - first half:  North/South green, East/West red
+      - second half: East/West green, North/South red
+
+    signal_timer advances when get_traffic_positions() is called.
 
     Output format:
       [
-        {"id": "<node_id>", "lat": <float>, "lon": <float>, "ns": "green|red", "ew": "green|red"},
+        {"id": "<node_id>", "lat": float, "lon": float,
+         "ns": "green|red", "ew": "green|red",
+         "cycle_pos": float, "cycle_len": float},
         ...
       ]
-
-    The phase is global (signal_timer) and matches is_green_for_edge():
-    first half of the cycle is N/S green, second half is E/W green.
-
-    signal_timer advances when get_traffic_positions() is called (e.g., /simulate or /road-heat).
     """
     global signal_timer, SIGNAL_CYCLE
 
     cycle_pos = signal_timer % SIGNAL_CYCLE
-    ns_green = cycle_pos < (SIGNAL_CYCLE / 2)
-    ew_green = not ns_green
+    ns_green  = cycle_pos < (SIGNAL_CYCLE / 2)
 
     ns = "green" if ns_green else "red"
-    ew = "green" if ew_green else "red"
+    ew = "green" if not ns_green else "red"
 
     out = []
     for node_id, data in G.nodes(data=True):
         if data.get("control") != "signal":
             continue
 
-        # OSMnx stores lon in 'x' and lat in 'y'
         lat = data.get("y")
         lon = data.get("x")
         if lat is None or lon is None:
             continue
 
         out.append({
-            "id": str(node_id),
-            "lat": float(lat),
-            "lon": float(lon),
-            "ns": ns,
-            "ew": ew,
+            "id":        str(node_id),
+            "lat":       float(lat),
+            "lon":       float(lon),
+            "ns":        ns,
+            "ew":        ew,
+            "cycle_pos": float(cycle_pos),
+            "cycle_len": float(SIGNAL_CYCLE),
         })
 
     return out
