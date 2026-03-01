@@ -1,15 +1,17 @@
-#Flask Backend 
-#test ignoring branch
+# Flask Backend
 import pandas as pd
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+
 from network import load_network, add_road, remove_road, network_to_json
-from traffic_simulation import get_traffic_positions
+from traffic_simulation import get_traffic_positions, get_road_heat
 
 app = Flask(__name__)
 CORS(app)
 
-# Load and prepare the Hourly "Pulse" data
+# ============================
+# Load Hourly Pulse Data
+# ============================
 df = pd.read_csv('RollaReport.csv')
 df['Time'] = pd.to_datetime(df['Time'])
 df['hour'] = df['Time'].dt.hour
@@ -29,12 +31,20 @@ speed_multipliers = {
     for hour in hourly_speeds.index
 }
 
-# Load the road network once when the server starts
+# ============================
+# Load Network
+# ============================
 G = load_network()
+
+
+# ============================
+# ROUTES
+# ============================
 
 @app.route('/roads', methods=['GET'])
 def get_roads():
     return jsonify(network_to_json(G))
+
 
 @app.route('/edit-road', methods=['POST'])
 def edit_road():
@@ -58,6 +68,7 @@ def edit_road():
 
     return jsonify({'status': 'success'})
 
+
 @app.route('/simulate', methods=['GET'])
 def simulate():
     hour = int(request.args.get('hour', 12))
@@ -73,5 +84,36 @@ def simulate():
 
     return jsonify(positions)
 
+
+@app.route('/road-heat', methods=['GET'])
+def road_heat():
+    """
+    Advances the simulation one step, then returns:
+    {
+      "counts": {edge_id: car_count},
+      "heat":   {edge_id: 0..1 normalized}
+    }
+    """
+
+    hour = int(request.args.get('hour', 12))
+
+    s_mult = speed_multipliers.get(hour, 1.0)
+    v_mult = demand_multipliers.get(hour, 1.0)
+
+    # ✅ Advance the simulation so cars actually move / exist
+    _ = get_traffic_positions(
+        G,
+        speed_multiplier=s_mult,
+        volume_multiplier=v_mult
+    )
+
+    # ✅ Now compute heat based on updated vehicle locations
+    heat_data = get_road_heat(G)
+    return jsonify(heat_data)
+
+
+# ============================
+# Run Server
+# ============================
 if __name__ == '__main__':
     app.run(debug=True)
