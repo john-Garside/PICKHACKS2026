@@ -496,11 +496,8 @@ def get_signal_states(G):
     """
     Returns a list of signalized intersections with current phase.
 
-    Two phases:
-      - first half:  North/South green, East/West red
-      - second half: East/West green, North/South red
-
-    signal_timer advances when get_traffic_positions() is called.
+    Uses the same per-node cycle length and NS split that signal_model uses
+    during simulation, so the UI always matches what the vehicles experience.
 
     Output format:
       [
@@ -510,13 +507,7 @@ def get_signal_states(G):
         ...
       ]
     """
-    global signal_timer, SIGNAL_CYCLE
-
-    cycle_pos = signal_timer % SIGNAL_CYCLE
-    ns_green  = cycle_pos < (SIGNAL_CYCLE / 2)
-
-    ns = "green" if ns_green else "red"
-    ew = "green" if not ns_green else "red"
+    global signal_timer
 
     out = []
     for node_id, data in G.nodes(data=True):
@@ -528,14 +519,20 @@ def get_signal_states(G):
         if lat is None or lon is None:
             continue
 
+        # Use per-node learned values (falls back to defaults if not yet initialised)
+        cycle     = signal_model._node_cycle(node_id)
+        ns_frac   = signal_model._node_split(node_id)
+        cycle_pos = signal_timer % cycle
+        ns_green  = cycle_pos < (cycle * ns_frac)
+
         out.append({
             "id":        str(node_id),
             "lat":       float(lat),
             "lon":       float(lon),
-            "ns":        ns,
-            "ew":        ew,
+            "ns":        "green" if ns_green else "red",
+            "ew":        "green" if not ns_green else "red",
             "cycle_pos": float(cycle_pos),
-            "cycle_len": float(SIGNAL_CYCLE),
+            "cycle_len": float(cycle),
         })
 
     return out
