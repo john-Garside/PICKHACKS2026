@@ -8,6 +8,8 @@ const SIM_ENDPOINT  = "/simulate";      // individual car positions
 const SIGNALS_ENDPOINT = "/signals";    // 🚦 traffic lights
 const STOPS_ENDPOINT   = "/stops";      // 🛑 stop signs (priority intersections)
 const MULT_ENDPOINT    = "/multipliers"; // ⏱️ hour -> volume/speed multipliers
+const WAIT_STATS_ENDPOINT = "/wait-stats"; // 📊 signal wait data
+const SET_MODE_ENDPOINT   = "/set-signal-mode"; // 🤖 switch signal model
 
 // How often we update
 const HEAT_MS = 800;    // heatmap refresh
@@ -45,6 +47,13 @@ let lastFrameMs = null;
 // 🚦 signals polling
 let signalsRunning = false;
 let signalsTimer = null;
+
+// 📊 wait stats polling
+let waitStatsTimer = null;
+const WAIT_STATS_MS = 1500;
+
+// 🤖 signal model mode
+let currentSignalMode = "pretrained";
 
 let centeredOnce = false;
 
@@ -521,6 +530,7 @@ function startHeatmap() {
   heatTimer = setInterval(() => {
     pollHeatOnce().catch(err => setStatus(`Heat error: ${err.message}`));
   }, HEAT_MS);
+  startWaitStats();
 }
 
 function stopHeatmap() {
@@ -529,6 +539,7 @@ function stopHeatmap() {
   heatTimer = null;
 
   stopSignals();
+  stopWaitStats();
 }
 
 function startCars() {
@@ -549,6 +560,7 @@ function startCars() {
   simTimer = setInterval(() => {
     pollSimOnce().catch(err => setStatus(`Sim error: ${err.message}`));
   }, FETCH_MS);
+  startWaitStats();
 }
 
 function stopCars() {
@@ -558,6 +570,7 @@ function stopCars() {
   clearCars();
 
   stopSignals();
+  stopWaitStats();
 }
 
 function startCurrentMode() {
@@ -681,6 +694,23 @@ function initUI() {
       else map.removeLayer(stopsLayer);
     });
   }
+
+  // 🤖 signal mode toggle button
+  const signalModeBtn = document.getElementById("btn-signal-mode");
+  if (signalModeBtn) {
+    updateSignalModeBtn(currentSignalMode);
+    signalModeBtn.addEventListener("click", toggleSignalMode);
+  }
+
+  // 📊 wait stats panel collapse/expand
+  const collapseBtn = document.getElementById("btn-wait-collapse");
+  const waitPanel   = document.getElementById("wait-stats-panel");
+  if (collapseBtn && waitPanel) {
+    collapseBtn.addEventListener("click", () => {
+      const isCollapsed = waitPanel.classList.toggle("collapsed");
+      collapseBtn.title = isCollapsed ? "Show panel" : "Hide panel";
+    });
+  }
 }
 
 // ======================
@@ -698,3 +728,161 @@ window.addEventListener("load", async () => {
   hideHeatOverlay();
   setStatus("Mode: Heatmap (press Start)");
 });
+// ======================
+// 📊 WAIT STATS
+// ======================
+
+function waitColor(avgSecs) {
+  if (avgSecs < 10) return "#4ade80";  // green
+  if (avgSecs < 18) return "#facc15";  // yellow
+  return "#f87171";                    // red
+}
+
+function updateWaitStatsUI(data) {
+  const avgEl  = document.getElementById("city-avg-wait");
+  const maxEl  = document.getElementById("city-max-wait");
+  const vehEl  = document.getElementById("city-total-vehs");
+  const timeEl = document.getElementById("wait-sim-time");
+  const badge  = document.getElementById("wait-mode-badge");
+  const tbody  = document.getElementById("wait-table-body");
+
+  if (!avgEl) return;
+
+  // City-wide numbers
+  const avg = data.city_avg_wait ?? 0;
+  const max = data.city_max_wait ?? 0;
+  avgEl.textContent  = avg > 0 ? `${avg.toFixed(1)}s` : "—";
+  avgEl.style.color  = avg > 0 ? waitColor(avg) : "#fff";
+  maxEl.textContent  = max > 0 ? `${max.toFixed(1)}s` : "—";
+  maxEl.style.color  = max > 0 ? waitColor(max) : "#fff";
+  vehEl.textContent  = (data.city_total_vehicles ?? 0).toLocaleString();
+  if (timeEl) timeEl.textContent = `${(data.sim_time ?? 0).toFixed(0)}s`;
+
+  // Mode badge
+  if (badge) {
+    const mode = (data.signal_mode ?? "fixed").toLowerCase();
+    badge.textContent = mode.toUpperCase();
+    badge.className = `mode-badge ${mode}`;
+  }
+
+  // Per-intersection table
+  if (!tbody) return;
+
+  const nodes = data.nodes ?? {};
+  const rows = Object.entries(nodes)
+    .map(([id, s]) => ({ id, ...s }))
+    .sort((a, b) => b.avg - a.avg)
+    .slice(0, 20);
+
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;opacity:0.4;padding:10px">No wait data yet</td></tr>`;
+    return;
+  }
+
+  const maxAvg = rows[0]?.avg ?? 1;
+  tbody.innerHTML = rows.map(r => {
+    const barW = Math.round((r.avg / Math.max(maxAvg, 1)) * 60);
+    const col  = waitColor(r.avg);
+    const nsPct = Math.round((r.ns_split ?? 0.5) * 100);
+    const ewPct = 100 - nsPct;
+    return `
+      <tr>
+        <td style="opacity:0.6;font-size:11px">${r.id.slice(-8)}</td>
+        <td>
+          <span class="wait-bar" style="width:${barW}px;background:${col}"></span>
+          <span style="color:${col};font-weight:700">${r.avg.toFixed(1)}s</span>
+        </td>
+        <td style="opacity:0.7">${r.max.toFixed(1)}s</td>
+        <td style="opacity:0.7">${r.cycle}s</td>
+        <td style="font-size:11px;opacity:0.7">${nsPct}N/${ewPct}E</td>
+      </tr>`;
+  }).join("");
+}
+
+function resetWaitStatsUI(newMode) {
+  const avgEl  = document.getElementById("city-avg-wait");
+  const maxEl  = document.getElementById("city-max-wait");
+  const vehEl  = document.getElementById("city-total-vehs");
+  const timeEl = document.getElementById("wait-sim-time");
+  const badge  = document.getElementById("wait-mode-badge");
+  const tbody  = document.getElementById("wait-table-body");
+
+  if (avgEl) { avgEl.textContent = "—"; avgEl.style.color = "#fff"; }
+  if (maxEl) { maxEl.textContent = "—"; maxEl.style.color = "#fff"; }
+  if (vehEl)  vehEl.textContent  = "—";
+  if (timeEl) timeEl.textContent = "0s";
+
+  if (badge && newMode) {
+    badge.textContent = newMode.toUpperCase();
+    badge.className   = `mode-badge ${newMode.toLowerCase()}`;
+  }
+
+  if (tbody) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;opacity:0.4;padding:10px">Switched model — accumulating new data…</td></tr>`;
+  }
+}
+
+async function pollWaitStats() {
+  try {
+    const data = await fetchJSON(WAIT_STATS_ENDPOINT);
+    updateWaitStatsUI(data);
+    // keep currentSignalMode in sync
+    currentSignalMode = data.signal_mode ?? currentSignalMode;
+  } catch (e) {
+    console.warn("Wait stats error:", e);
+  }
+}
+
+function startWaitStats() {
+  if (waitStatsTimer) return;
+  pollWaitStats();
+  waitStatsTimer = setInterval(pollWaitStats, WAIT_STATS_MS);
+}
+
+function stopWaitStats() {
+  if (waitStatsTimer) clearInterval(waitStatsTimer);
+  waitStatsTimer = null;
+}
+
+// ======================
+// 🤖 SIGNAL MODE TOGGLE
+// ======================
+
+function updateSignalModeBtn(mode) {
+  const btn   = document.getElementById("btn-signal-mode");
+  const icon  = document.getElementById("signal-mode-icon");
+  const label = document.getElementById("signal-mode-label");
+  if (!btn) return;
+
+  if (mode === "fixed") {
+    icon.textContent  = "🔧";
+    label.textContent = "Fixed";
+    btn.classList.add("fixed-mode");
+  } else {
+    icon.textContent  = "📂";
+    label.textContent = "Pretrained";
+    btn.classList.remove("fixed-mode");
+  }
+}
+
+async function toggleSignalMode() {
+  const nextMode = (currentSignalMode === "fixed") ? "pretrained" : "fixed";
+  try {
+    setStatus(`Switching to ${nextMode} signal model...`);
+    const res = await fetch(BACKEND_BASE + SET_MODE_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: nextMode })
+    });
+    const data = await res.json();
+    currentSignalMode = data.signal_mode ?? nextMode;
+    updateSignalModeBtn(currentSignalMode);
+    // Clear stale stats from the previous model immediately
+    resetWaitStatsUI(currentSignalMode);
+    setStatus(`Signal model: ${currentSignalMode.toUpperCase()} — wait data reset`);
+    // Resume polling so new data starts filling in right away
+    pollWaitStats();
+  } catch (e) {
+    setStatus(`Mode switch failed: ${e.message}`);
+  }
+}
