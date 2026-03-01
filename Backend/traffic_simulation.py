@@ -69,8 +69,10 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
 
         # If no probe data, give very small baseline
         if base_volume <= 0:
-            base_volume = 1
+            base_volume = 0.01
 
+        if data.get("junction") == "roundabout":
+            base_volume *= 0.15  # heavily reduce spawn weight
         # Apply hourly demand multiplier
         adjusted_volume = float(base_volume) * float(volume_multiplier)
 
@@ -84,10 +86,8 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
     # 2) Determine total city cars.
     #    Rolla population ~20k; even at 3am there are meaningful vehicles present.
     #    A floor of 0.15 prevents the city from going nearly empty off-peak. (BUG FIX)
-    BASE_CITY_CARS = 1200
-    DEMAND_FLOOR = 0.15
-    effective_multiplier = max(DEMAND_FLOOR, float(volume_multiplier))
-    MAX_CITY_CARS = max(1, int(BASE_CITY_CARS * effective_multiplier))
+    BASE_CITY_CARS = 800  # tune this for peak hour feel
+    MAX_CITY_CARS = max(1, int(BASE_CITY_CARS * float(volume_multiplier)))
 
     print(f"Spawning {MAX_CITY_CARS} vehicles for this hour (vol_mult={volume_multiplier:.2f}).")
 
@@ -97,18 +97,20 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
 
     sampled_edges = random.choices(edge_pool, weights=weights, k=MAX_CITY_CARS)
 
-    for u, v, key, data in sampled_edges:
-        base_speed = data.get("speed_kph", 30)
-        if isinstance(base_speed, list):
-            base_speed = base_speed[0]
-        base_speed = float(base_speed)
+    for i, (u, v, key, data) in enumerate(sampled_edges):
+        std = data.get('traffic_speed_std', 5.0)  # stored from GeoJSON
+        base_speed = random.gauss(data.get('speed_kph', 30), std * 0.5)
+        base_speed = max(10.0, base_speed)  # floor it
+
+        is_roundabout = data.get("junction") == "roundabout"
+        progress = (i % 10) / 10.0 if is_roundabout else random.random()
 
         vehicles.append({
             "id": vehicle_id,
             "u": u,
             "v": v,
             "key": key,
-            "progress": random.random(),
+            "progress": progress,
             "speed_kph": base_speed,   # raw speed; multiplier applied at step time
             "current_speed_ms": base_speed / 3.6
         })

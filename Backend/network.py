@@ -197,7 +197,8 @@ def apply_traffic_data(G, geojson_path):
             u, v, key = nearest_edges[i]
 
             G[u][v][key]['traffic_speed'] = results.get('harmonicAverageSpeed')
-            G[u][v][key]['traffic_volume'] = results.get('sampleSize', 0)
+            G[u][v][key]['traffic_volume'] = results.get('normalizedSampleSize', 0)
+            G[u][v][key]['traffic_speed_std'] = results.get('standardDeviationSpeed', 5.0)
         except Exception:
             continue
 
