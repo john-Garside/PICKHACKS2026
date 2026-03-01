@@ -270,35 +270,45 @@ function hideHeatOverlay() {
 // 🚦 SIGNALS (traffic lights UI)
 // ======================
 function makeSignalIcon(nsColor, ewColor) {
+  const nsGreen = nsColor === "rgb(0,255,0)";
+  const ewGreen = ewColor === "rgb(0,255,0)";
+
+  function row(color, isGreen, label) {
+    const dimmed = isGreen ? "1" : "0.3";
+    return `
+      <div style="display:flex;align-items:center;gap:3px;opacity:${dimmed}">
+        <div style="
+          width:8px;height:8px;flex-shrink:0;border-radius:50%;
+          background:${color};
+          box-shadow:${isGreen ? `0 0 5px ${color}` : "none"};
+        "></div>
+        <span style="
+          font:bold 8px/1 monospace;
+          color:${color};
+          white-space:nowrap;
+        ">${label}</span>
+      </div>`;
+  }
+
   const html = `
     <div style="
-      width:18px; padding:2px 3px;
-      background: rgba(0,0,0,0.55);
-      border: 1px solid rgba(255,255,255,0.25);
-      border-radius: 6px;
-      display:flex; flex-direction:column; gap:2px;
-      box-shadow: 0 0 6px rgba(0,0,0,0.35);
+      padding:3px 5px;
+      background:rgba(0,0,0,0.72);
+      border:1px solid rgba(255,255,255,0.18);
+      border-radius:6px;
+      display:flex;flex-direction:column;gap:3px;
+      box-shadow:0 0 8px rgba(0,0,0,0.5);
+      pointer-events:none;
     ">
-      <div style="
-        width:10px; height:10px; border-radius:50%;
-        background:${nsColor};
-        box-shadow: 0 0 6px ${nsColor};
-        margin: 0 auto;
-      "></div>
-      <div style="
-        width:10px; height:10px; border-radius:50%;
-        background:${ewColor};
-        box-shadow: 0 0 6px ${ewColor};
-        margin: 0 auto;
-      "></div>
-    </div>
-  `;
+      ${row(nsColor, nsGreen, "N↑ S↓")}
+      ${row(ewColor, ewGreen, "E→ W←")}
+    </div>`;
 
   return L.divIcon({
     className: "",
     html,
-    iconSize: [18, 26],
-    iconAnchor: [9, 13]
+    iconSize: [62, 36],
+    iconAnchor: [31, 18]
   });
 }
 
