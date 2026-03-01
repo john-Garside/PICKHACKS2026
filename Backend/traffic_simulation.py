@@ -6,6 +6,8 @@ from collections import defaultdict
 # Global state
 # ============================
 vehicles = []
+edge_queues = {}
+vehicle_delay = {}
 initialized = False
 current_vol_bin = -1   # tracks volume_multiplier for re-spawn
 current_spd_bin = -1   # tracks speed_multiplier for re-spawn (BUG FIX: was missing)
@@ -58,6 +60,8 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
     """
     global vehicles
     vehicles = []
+    edge_queues = {}
+    vehicle_delay = {}
     vehicle_id = 0
 
     # 1) Collect edge weights
@@ -271,7 +275,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0
                             queue = edge_queues[edge_id]
                             pos_in_q = queue.index(vehicle["id"])
                             
-                            if is_green and pos_in_q < discharge_rate:
+                            if is_green and pos_in_q < int(discharge_rate) + (1 if random.random() < (discharge_rate % 1) else 0):
                                 queue.pop(pos_in_q)
                             else:
                                 vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + float(dt)
