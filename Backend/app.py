@@ -94,6 +94,7 @@ def road_heat():
       "heat":   {edge_id: 0..1 normalized}
     }
     """
+
     hour = int(request.args.get('hour', 12))
 
     s_mult = speed_multipliers.get(hour, 1.0)
@@ -111,13 +112,35 @@ def road_heat():
     return jsonify(heat_data)
 
 
+# ============================
+# 🚦 Signals (traffic lights) for UI
+# ============================
 @app.route('/signals', methods=['GET'])
 def signals():
-    """
-    Returns current traffic-signal phases at signalized nodes.
-    NOTE: Does not advance the sim by itself. Phase updates as /simulate or /road-heat advance the timer.
-    """
+    """Return signal nodes + their current phase for the frontend."""
     return jsonify(get_signal_states(G))
+
+
+# ============================
+# 🛑 Stop signs (priority intersections) for UI
+# ============================
+@app.route('/stops', methods=['GET'])
+def stops():
+    """Return priority-controlled nodes as stop-sign markers for the frontend."""
+    out = []
+    for node_id, data in G.nodes(data=True):
+        if data.get('control') != 'priority':
+            continue
+        x = data.get('x')
+        y = data.get('y')
+        if x is None or y is None:
+            continue
+        out.append({
+            'id': str(node_id),
+            'lat': float(y),
+            'lon': float(x)
+        })
+    return jsonify(out)
 
 
 # ============================
