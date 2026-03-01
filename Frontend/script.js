@@ -459,9 +459,25 @@ document.addEventListener("click", (e) => {
   if (!e._fromNode) hideNodePopup();
 });
 
+// Returns a pixel radius that grows as you zoom in, making nodes easier to click
+function nodeHitRadius() {
+  const zoom = map.getZoom();
+  // At zoom 14 (default) → 18px. Each zoom level doubles the scale,
+  // so we scale radius proportionally: radius = base * 2^(zoom - baseZoom)
+  const BASE_ZOOM = 14;
+  const BASE_RADIUS = 28;
+  const scaled = BASE_RADIUS * Math.pow(2, zoom - BASE_ZOOM);
+  // Clamp between 12px (zoomed way out) and 80px (zoomed way in)
+  return Math.max(12, Math.min(80, scaled));
+}
+
+// Store node data so we can update radii on zoom
+const nodeMarkers = []; // { marker, ... }
+
 async function loadNodesOnce() {
   const list = await fetchJSON(NODES_ENDPOINT);
   nodesLayer.clearLayers();
+  nodeMarkers.length = 0;
 
   for (const n of (list ?? [])) {
     const id      = String(n.id);
@@ -477,9 +493,8 @@ async function loadNodesOnce() {
         ? "🛑 Stop / Yield Intersection"
         : "⬤ Free-Flow Intersection";
 
-    // Larger radius so it is easy to click; fully invisible
     const m = L.circleMarker([lat, lon], {
-      radius: 22,
+      radius: nodeHitRadius(),
       color: "transparent",
       fillColor: "transparent",
       fillOpacity: 0,
@@ -494,6 +509,19 @@ async function loadNodesOnce() {
         + `<span style="opacity:0.6;font-size:11px">Roads: ${degree} &nbsp;|&nbsp; ID ${id}</span>`;
       showNodePopup(html, e.originalEvent);
     });
+
+    nodeMarkers.push(m);
+  }
+
+  // Update all node hitbox radii whenever the map zoom changes
+  map.off("zoomend", updateNodeRadii); // avoid duplicate listeners
+  map.on("zoomend", updateNodeRadii);
+}
+
+function updateNodeRadii() {
+  const r = nodeHitRadius();
+  for (const m of nodeMarkers) {
+    m.setRadius(r);
   }
 }
 
