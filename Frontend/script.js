@@ -5,10 +5,12 @@ const BACKEND_BASE = "http://127.0.0.1:5000";
 const ROADS_ENDPOINT = "/roads";        // draw roads
 const HEAT_ENDPOINT = "/road-heat";     // road heat data (advances sim if your Flask route does)
 const SIM_ENDPOINT  = "/simulate";      // individual car positions
+const SIGNALS_ENDPOINT = "/signals";    // 🚦 traffic lights
 
 // How often we update
-const HEAT_MS = 800;   // heatmap refresh
-const FETCH_MS = 400;  // car fetch refresh
+const HEAT_MS = 800;    // heatmap refresh
+const FETCH_MS = 400;   // car fetch refresh
+const SIGNALS_MS = 500; // 🚦 light refresh
 
 // Smoothing time constant (ms) for car markers
 const CHASE_TAU_MS = 900;
@@ -20,6 +22,7 @@ let map;
 let roadsLayer;     // base roads (always neutral)
 let heatLayer;      // ✅ overlay heat layer (added/removed on toggle)
 let carsLayer;
+let signalsLayer;   // 🚦 signal markers layer
 let canvasRenderer;
 
 let currentHour = 12;
@@ -36,6 +39,10 @@ let carsRunning = false;
 let simTimer = null;
 let lastFrameMs = null;
 
+// 🚦 signals polling
+let signalsRunning = false;
+let signalsTimer = null;
+
 let centeredOnce = false;
 
 // Base road polylines (neutral)
@@ -47,6 +54,10 @@ const heatLines = new Map(); // edgeId -> polyline
 // Store car markers + smoothing state
 // id -> { marker, target:{lat,lon}, smooth:{lat,lon} }
 const cars = new Map();
+
+// 🚦 Store signal markers
+// nodeId -> marker
+const signalMarkers = new Map();
 
 // ======================
 // UTIL
@@ -135,6 +146,9 @@ function initMap() {
 
   // Cars layer always exists, but only used in cars mode
   carsLayer = L.layerGroup().addTo(map);
+
+  // 🚦 Signals layer (can be toggled)
+  signalsLayer = L.layerGroup().addTo(map);
 }
 
 // ======================
@@ -206,6 +220,112 @@ function showHeatOverlay() {
 
 function hideHeatOverlay() {
   if (map.hasLayer(heatLayer)) map.removeLayer(heatLayer);
+}
+
+// ======================
+// 🚦 SIGNALS (traffic lights UI)
+// ======================
+function makeSignalIcon(nsColor, ewColor) {
+  const html = `
+    <div style="
+      width:18px; padding:2px 3px;
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 6px;
+      display:flex; flex-direction:column; gap:2px;
+      box-shadow: 0 0 6px rgba(0,0,0,0.35);
+    ">
+      <div style="
+        width:10px; height:10px; border-radius:50%;
+        background:${nsColor};
+        box-shadow: 0 0 6px ${nsColor};
+        margin: 0 auto;
+      "></div>
+      <div style="
+        width:10px; height:10px; border-radius:50%;
+        background:${ewColor};
+        box-shadow: 0 0 6px ${ewColor};
+        margin: 0 auto;
+      "></div>
+    </div>
+  `;
+
+  return L.divIcon({
+    className: "",
+    html,
+    iconSize: [18, 26],
+    iconAnchor: [9, 13]
+  });
+}
+
+async function pollSignalsOnce() {
+  const list = await fetchJSON(SIGNALS_ENDPOINT);
+  const seen = new Set();
+
+  for (const s of (list ?? [])) {
+    const id = String(s.id);
+    const lat = Number(s.lat);
+    const lon = Number(s.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+    seen.add(id);
+
+    const ns = (s.ns === "green") ? "rgb(0,255,0)" : "rgb(255,0,0)";
+    const ew = (s.ew === "green") ? "rgb(0,255,0)" : "rgb(255,0,0)";
+    const icon = makeSignalIcon(ns, ew);
+
+    if (!signalMarkers.has(id)) {
+      const m = L.marker([lat, lon], { icon }).addTo(signalsLayer);
+
+      // ✅ Tooltip opens on hover and stays until unhover
+      m.bindTooltip(`Signal ${id} • NS: ${s.ns} • EW: ${s.ew}`, {
+        permanent: true,
+        direction: "top",
+        offset: [0, -14],
+        opacity: 0.95
+      });
+
+      // Start hidden (only show while hovered)
+      m.closeTooltip();
+
+      // Attach hover handlers ONCE
+      m.on("mouseover", () => m.openTooltip());
+      m.on("mouseout",  () => m.closeTooltip());
+
+      signalMarkers.set(id, m);
+    } else {
+      const m = signalMarkers.get(id);
+      m.setLatLng([lat, lon]);
+      m.setIcon(icon);
+
+      // ✅ Update tooltip text only (no rebinding / no reattaching events)
+      m.setTooltipContent(`Signal ${id} • NS: ${s.ns} • EW: ${s.ew}`);
+    }
+  }
+
+  // remove signals no longer present
+  for (const [id, m] of signalMarkers.entries()) {
+    if (!seen.has(id)) {
+      signalsLayer.removeLayer(m);
+      signalMarkers.delete(id);
+    }
+  }
+}
+
+function startSignals() {
+  if (signalsRunning) return;
+  signalsRunning = true;
+
+  pollSignalsOnce().catch(err => console.warn("Signals error:", err));
+  signalsTimer = setInterval(() => {
+    pollSignalsOnce().catch(err => console.warn("Signals error:", err));
+  }, SIGNALS_MS);
+}
+
+function stopSignals() {
+  signalsRunning = false;
+  if (signalsTimer) clearInterval(signalsTimer);
+  signalsTimer = null;
 }
 
 // ======================
@@ -327,6 +447,9 @@ function startHeatmap() {
   document.getElementById("btn-toggle-sim").textContent = "Stop";
   setStatus("Heatmap running...");
 
+  // 🚦 start signals while sim runs
+  startSignals();
+
   pollHeatOnce().catch(err => setStatus(`Heat error: ${err.message}`));
   heatTimer = setInterval(() => {
     pollHeatOnce().catch(err => setStatus(`Heat error: ${err.message}`));
@@ -337,6 +460,9 @@ function stopHeatmap() {
   heatRunning = false;
   if (heatTimer) clearInterval(heatTimer);
   heatTimer = null;
+
+  // 🚦 stop signals when sim stops
+  stopSignals();
 }
 
 function startCars() {
@@ -348,6 +474,9 @@ function startCars() {
 
   document.getElementById("btn-toggle-sim").textContent = "Stop";
   setStatus("Cars view running...");
+
+  // 🚦 start signals while sim runs
+  startSignals();
 
   lastFrameMs = null;
   requestAnimationFrame(animateCarsFrame);
@@ -363,6 +492,9 @@ function stopCars() {
   if (simTimer) clearInterval(simTimer);
   simTimer = null;
   clearCars();
+
+  // 🚦 stop signals when sim stops
+  stopSignals();
 }
 
 function startCurrentMode() {
@@ -388,10 +520,8 @@ function setMode(newMode) {
   } else {
     // entering heat mode: remove cars and show heat overlay (but only runs when started)
     clearCars();
-    showHeatOverlay();         // so user immediately sees heat styling once started
-    // if you want overlay hidden until Start is pressed, comment the line above
-    // and rely on startHeatmap() to show it.
-    hideHeatOverlay();         // keep it hidden until user presses Start
+    showHeatOverlay(); // so user immediately sees heat styling once started
+    hideHeatOverlay(); // keep it hidden until user presses Start
   }
 
   viewMode = newMode;
@@ -464,6 +594,16 @@ function initUI() {
         setMode("heat");
       }
     };
+  }
+
+  // 🚦 show/hide traffic lights without stopping sim
+  const lightsToggle = document.getElementById("lightsToggle");
+  if (lightsToggle) {
+    lightsToggle.checked = true;
+    lightsToggle.addEventListener("change", () => {
+      if (lightsToggle.checked) map.addLayer(signalsLayer);
+      else map.removeLayer(signalsLayer);
+    });
   }
 }
 

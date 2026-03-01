@@ -4,7 +4,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from network import load_network, add_road, remove_road, network_to_json
-from traffic_simulation import get_traffic_positions, get_road_heat
+from traffic_simulation import get_traffic_positions, get_road_heat, get_signal_states
 
 app = Flask(__name__)
 CORS(app)
@@ -94,7 +94,6 @@ def road_heat():
       "heat":   {edge_id: 0..1 normalized}
     }
     """
-
     hour = int(request.args.get('hour', 12))
 
     s_mult = speed_multipliers.get(hour, 1.0)
@@ -110,6 +109,15 @@ def road_heat():
     # ✅ Now compute heat based on updated vehicle locations
     heat_data = get_road_heat(G)
     return jsonify(heat_data)
+
+
+@app.route('/signals', methods=['GET'])
+def signals():
+    """
+    Returns current traffic-signal phases at signalized nodes.
+    NOTE: Does not advance the sim by itself. Phase updates as /simulate or /road-heat advance the timer.
+    """
+    return jsonify(get_signal_states(G))
 
 
 # ============================

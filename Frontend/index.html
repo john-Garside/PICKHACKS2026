@@ -24,6 +24,15 @@
         <span id="viewLabel">Heatmap</span>
       </div>
 
+      <!-- 🚦 TRAFFIC LIGHT TOGGLE -->
+      <div class="view-toggle">
+        <label class="switch">
+          <input type="checkbox" id="lightsToggle" checked>
+          <span class="slider round"></span>
+        </label>
+        <span>Traffic Lights</span>
+      </div>
+
     </div>
     <div class="toolbar-right">
       <span id="status" class="status-inline">Ready.</span>
@@ -34,7 +43,7 @@
     <div id="time-controls" class="map-overlay">
       <div class="control-group">
         <label for="hourSlider">
-          <b>Time of Day:</b> 
+          <b>Time of Day:</b>
           <span id="hourLabel">12:00 PM</span>
         </label>
         <input type="range" id="hourSlider" min="0" max="23" value="12" step="1">

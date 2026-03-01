@@ -177,7 +177,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
 
     for vehicle in vehicles:
         edge_id = (vehicle["u"], vehicle["v"], vehicle["key"])
-    
+
         if edge_id not in edge_queues:
             edge_queues[edge_id] = []
 
@@ -210,7 +210,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                 if control == "signal":
                     # Check directional green light
                     is_green = is_green_for_edge(u, v, key, G, signal_timer)
-                    
+
                     lanes = edge_data.get("lanes", 1)
                     if isinstance(lanes, list): lanes = lanes[0]
                     try:
@@ -239,12 +239,12 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                             # HOLD AT INTERSECTION
                             vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + SIMULATION_STEP_TIME
                             vehicle["progress"] = 0.999
-                            remaining_m = 0 
-                            continue 
+                            remaining_m = 0
+                            continue
                     else:
                         # Light is green and no queue, proceed normally
                         next_options = list(G.out_edges(current_node, keys=True))
-                
+
                 # ===============================
                 # PRIORITY INTERSECTION
                 # ===============================
@@ -273,7 +273,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                 # Transition to next road
                 # ===============================
                 next_options = list(G.out_edges(current_node, keys=True))
-                
+
                 if next_options:
                     # Filter out the edge that goes back to where we just came from (u)
                     # next_option format is (v, next_node, key)
@@ -293,7 +293,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
 
                 vehicle["u"], vehicle["v"], vehicle["key"] = new_u, new_v, new_key
                 vehicle["progress"] = 0.0
-                edge_id = (new_u, new_v, new_key) # Update edge_id for the next loop/queue check
+                edge_id = (new_u, new_v, new_key)  # Update edge_id for the next loop/queue check
 
                 # update speed for new edge
                 new_data = G[new_u][new_v][new_key]
@@ -314,30 +314,62 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
     return positions
 
 
-
-#Find if traffic light is green for each direction
+# Find if traffic light is green for each direction
 def is_green_for_edge(u, v, key, G, current_timer):
     node_data = G.nodes[v]
     if node_data.get("control") != "signal":
-        return True # Not a signalized intersection
-    
+        return True  # Not a signalized intersection
+
     # Calculate cycle position
     cycle_pos = current_timer % SIGNAL_CYCLE
-    
-    # Simple Phase Logic: 
+
+    # Simple Phase Logic:
     # Determine if the incoming road (u -> v) is North-South or East-West
     u_data = G.nodes[u]
     v_data = G.nodes[v]
-    
+
     # Calculate delta y vs delta x to find orientation
     is_north_south = abs(u_data['y'] - v_data['y']) > abs(u_data['x'] - v_data['x'])
-    
+
     if is_north_south:
         # North-South is green for the first half of the cycle
         return cycle_pos < (SIGNAL_CYCLE / 2)
     else:
         # East-West is green for the second half of the cycle
         return cycle_pos >= (SIGNAL_CYCLE / 2)
+
+
+# ============================
+# 🚦 Traffic light state export (for UI)
+# ============================
+def get_signal_states(G):
+    """
+    Returns a list of signalized intersections with current phase.
+    We treat the cycle as two phases:
+      - first half: North/South green, East/West red
+      - second half: East/West green, North/South red
+    """
+    global signal_timer
+
+    cycle_pos = signal_timer % SIGNAL_CYCLE
+    ns_green = cycle_pos < (SIGNAL_CYCLE / 2)
+    ew_green = not ns_green
+
+    signals = []
+    for node, data in G.nodes(data=True):
+        if data.get("control") == "signal":
+            signals.append({
+                "id": node,
+                "lat": float(data["y"]),
+                "lon": float(data["x"]),
+                "ns": "green" if ns_green else "red",
+                "ew": "green" if ew_green else "red",
+                "cycle_pos": float(cycle_pos),
+                "cycle_len": float(SIGNAL_CYCLE),
+            })
+    return signals
+
+
 # ============================
 # Heatmap support (cars per road, normalized by lanes + road class)
 # ============================
