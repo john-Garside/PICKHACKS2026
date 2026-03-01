@@ -92,32 +92,27 @@ def initialize_vehicles(G, volume_multiplier=1.0, speed_multiplier=1.0):
     print(f"Spawning {MAX_CITY_CARS} vehicles for this hour (vol_mult={volume_multiplier:.2f}).")
 
     # 3) Distribute proportionally
-    for u, v, key, data, adjusted_volume in edges_data:
-        share = adjusted_volume / total_weight
-        num_to_spawn = int(share * MAX_CITY_CARS)
+    edge_pool = [(u, v, key, data) for u, v, key, data, _ in edges_data]
+    weights    = [w for _, _, _, _, w in edges_data]
 
-        if num_to_spawn <= 0:
-            continue
+    sampled_edges = random.choices(edge_pool, weights=weights, k=MAX_CITY_CARS)
 
-        # Store the RAW base speed — do NOT multiply by speed_multiplier here.
-        # The step loop applies speed_multiplier at move time, so it stays consistent
-        # across edge hops and hour changes without requiring re-spawning. (BUG FIX)
+    for u, v, key, data in sampled_edges:
         base_speed = data.get("speed_kph", 30)
         if isinstance(base_speed, list):
             base_speed = base_speed[0]
         base_speed = float(base_speed)
 
-        for _ in range(num_to_spawn):
-            vehicles.append({
-                "id": vehicle_id,
-                "u": u,
-                "v": v,
-                "key": key,
-                "progress": random.random(),
-                "speed_kph": base_speed,   # raw speed; multiplier applied at step time
-                "current_speed_ms": base_speed / 3.6
-            })
-            vehicle_id += 1
+        vehicles.append({
+            "id": vehicle_id,
+            "u": u,
+            "v": v,
+            "key": key,
+            "progress": random.random(),
+            "speed_kph": base_speed,   # raw speed; multiplier applied at step time
+            "current_speed_ms": base_speed / 3.6
+        })
+        vehicle_id += 1
 
     print(f"Simulation loaded with {len(vehicles)} vehicles.")
 
