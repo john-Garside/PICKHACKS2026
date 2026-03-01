@@ -3,10 +3,11 @@
 // ======================
 const BACKEND_BASE = "http://127.0.0.1:5000";
 const ROADS_ENDPOINT = "/roads";        // draw roads
-const HEAT_ENDPOINT = "/road-heat";     // road heat data (advances sim if your Flask route does)
+const HEAT_ENDPOINT = "/road-heat";     // road heat data
 const SIM_ENDPOINT  = "/simulate";      // individual car positions
 const SIGNALS_ENDPOINT = "/signals";    // 🚦 traffic lights
 const STOPS_ENDPOINT   = "/stops";      // 🛑 stop signs (priority intersections)
+const MULT_ENDPOINT    = "/multipliers"; // ⏱️ hour -> volume/speed multipliers
 
 // How often we update
 const HEAT_MS = 800;    // heatmap refresh
@@ -21,7 +22,7 @@ const CHASE_TAU_MS = 900;
 // ======================
 let map;
 let roadsLayer;     // base roads (always neutral)
-let heatLayer;      // ✅ overlay heat layer (added/removed on toggle)
+let heatLayer;      // overlay heat layer
 let carsLayer;
 let signalsLayer;   // 🚦 signal markers layer
 let stopsLayer;     // 🛑 stop sign markers layer
@@ -50,7 +51,7 @@ let centeredOnce = false;
 // Base road polylines (neutral)
 const roadLines = new Map(); // edgeId -> polyline
 
-// ✅ Heat overlay polylines (colored by congestion)
+// Heat overlay polylines (colored by congestion)
 const heatLines = new Map(); // edgeId -> polyline
 
 // Store car markers + smoothing state
@@ -123,6 +124,34 @@ function heatColor(t) {
     const r = 255;
     const g = Math.round(255 * (1 - a));
     return `rgb(${r},${g},0)`;
+  }
+}
+
+// ======================
+// ⏱️ TIME UI + MULTIPLIERS UI
+// ======================
+function formatHourLabel(hour24) {
+  const h = Number(hour24) % 24;
+  const displayHour = h % 12 || 12;
+  const ampm = h >= 12 ? "PM" : "AM";
+  return `${displayHour}:00 ${ampm}`;
+}
+
+async function refreshMultipliersUI() {
+  const volEl = document.getElementById("vol-mult");
+  const spdEl = document.getElementById("speed-mult");
+  if (!volEl || !spdEl) return;
+
+  try {
+    const m = await fetchJSON(`${MULT_ENDPOINT}?hour=${currentHour}`);
+    const v = Number(m.volume_multiplier ?? 1);
+    const s = Number(m.speed_multiplier ?? 1);
+
+    // Display as %
+    volEl.textContent = `${Math.round(v * 100)}%`;
+    spdEl.textContent = `${Math.round(s * 100)}%`;
+  } catch (e) {
+    console.warn("Multipliers UI error:", e);
   }
 }
 
@@ -359,7 +388,6 @@ async function loadStopsOnce() {
   const list = await fetchJSON(STOPS_ENDPOINT);
   const icon = makeStopSignIcon();
 
-  // clear previous
   stopsLayer.clearLayers();
   stopMarkers.clear();
 
@@ -369,7 +397,6 @@ async function loadStopsOnce() {
     const lon = Number(s.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
 
-    // NO tooltips
     const m = L.marker([lat, lon], { icon }).addTo(stopsLayer);
     stopMarkers.set(id, m);
   }
@@ -569,6 +596,31 @@ function setMode(newMode) {
 // UI
 // ======================
 function initUI() {
+  // ⏱️ time slider
+  const hourSlider = document.getElementById("hourSlider");
+  const hourLabel  = document.getElementById("hourLabel");
+
+  if (hourSlider) {
+    currentHour = Number(hourSlider.value ?? 12);
+    if (hourLabel) hourLabel.textContent = formatHourLabel(currentHour);
+
+    // initialize stats
+    refreshMultipliersUI();
+
+    hourSlider.oninput = function () {
+      currentHour = Number(this.value ?? 12);
+      if (hourLabel) hourLabel.textContent = formatHourLabel(currentHour);
+
+      // update multipliers display
+      refreshMultipliersUI();
+
+      setStatus(`Time set to ${formatHourLabel(currentHour)}`);
+    };
+  } else {
+    // If the slider isn't in the HTML, just set default multipliers display if elements exist
+    refreshMultipliersUI();
+  }
+
   document.getElementById("btn-refresh").onclick = () =>
     loadRoads().catch(err => setStatus(`Road error: ${err.message}`));
 

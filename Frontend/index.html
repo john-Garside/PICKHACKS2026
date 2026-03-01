@@ -49,6 +49,29 @@
   </header>
 
   <main>
+    <!-- ⏱️ Overlay: Time + multipliers -->
+    <div class="map-overlay" id="time-controls">
+      <div class="control-group">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+          <div style="font-weight:700;">Time</div>
+          <div id="hourLabel" style="font-weight:700;">12:00 PM</div>
+        </div>
+
+        <input id="hourSlider" type="range" min="0" max="23" step="1" value="12" />
+      </div>
+
+      <div class="stats-group">
+        <div style="display:flex; justify-content:space-between; padding-top:6px;">
+          <span>Traffic Volume</span>
+          <span id="vol-mult">100%</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; padding-top:6px;">
+          <span>Avg Speed</span>
+          <span id="speed-mult">100%</span>
+        </div>
+      </div>
+    </div>
+
     <div id="map"></div>
   </main>
 

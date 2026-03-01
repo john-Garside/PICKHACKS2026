@@ -156,7 +156,7 @@ def _point_on_edge(G, u, v, key, progress):
 # ============================
 # Main simulation step
 # ============================
-def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
+def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0, dt=1.0):
     """
     Update vehicle positions in the city.
     Features: directional traffic light phases (N-S vs E-W), queues, and delays.
@@ -164,7 +164,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
     global initialized, current_vol_bin, vehicles, edge_queues, vehicle_delay, signal_timer
 
     # Advance global signal timer
-    signal_timer += SIMULATION_STEP_TIME
+    signal_timer += float(dt)
 
     # Re-initialize vehicles if volume changed
     vol_bin = round(volume_multiplier, 1)
@@ -182,7 +182,7 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
             edge_queues[edge_id] = []
 
         teleported_this_tick = False
-        remaining_m = (vehicle["speed_kph"] * speed_multiplier) / 3.6 * SIMULATION_STEP_TIME
+        remaining_m = (vehicle["speed_kph"] * speed_multiplier) / 3.6 * float(dt)
 
         hops_left = 25  # safety to avoid infinite loops
 
@@ -249,19 +249,38 @@ def get_traffic_positions(G, speed_multiplier=1.0, volume_multiplier=1.0):
                 # PRIORITY INTERSECTION
                 # ===============================
                 elif control == "priority":
-                    if not vehicle.get("stopped_at_node"):
-                        vehicle["stop_timer"] = 2
-                        vehicle["stopped_at_node"] = True
+                    # Only stop cars that are approaching from a MINOR road.
+                    # Cars coming from a MAJOR road should pass through without stopping.
 
-                    if vehicle.get("stop_timer", 0) > 0:
-                        vehicle["stop_timer"] -= SIMULATION_STEP_TIME
-                        vehicle["progress"] = 0.999
-                        remaining_m = 0
-                        vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0) + SIMULATION_STEP_TIME
-                        continue
-                    else:
+                    major_roads = {"primary", "secondary", "trunk"}
+
+                    incoming_highway = edge_data.get("highway", "residential")
+                    if isinstance(incoming_highway, list):
+                        incoming_highway = incoming_highway[0]
+                    incoming_highway = str(incoming_highway)
+
+                    coming_from_major = incoming_highway in major_roads
+
+                    if coming_from_major:
+                        # Major road has priority: do NOT stop here
                         vehicle["stopped_at_node"] = False
+                        vehicle["stop_timer"] = 0.0
                         next_options = list(G.out_edges(current_node, keys=True))
+                    else:
+                        # Side road must stop
+                        if not vehicle.get("stopped_at_node"):
+                            vehicle["stop_timer"] = 2.0
+                            vehicle["stopped_at_node"] = True
+
+                        if vehicle.get("stop_timer", 0.0) > 0.0:
+                            vehicle["stop_timer"] -= float(dt)
+                            vehicle["progress"] = 0.999
+                            remaining_m = 0.0
+                            vehicle_delay[vehicle["id"]] = vehicle_delay.get(vehicle["id"], 0.0) + float(dt)
+                            continue
+                        else:
+                            vehicle["stopped_at_node"] = False
+                            next_options = list(G.out_edges(current_node, keys=True))
 
                 # ===============================
                 # FREE-FLOW INTERSECTION

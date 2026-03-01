@@ -77,10 +77,11 @@ def simulate():
     v_mult = demand_multipliers.get(hour, 1.0)
 
     positions = get_traffic_positions(
-        G,
-        speed_multiplier=s_mult,
-        volume_multiplier=v_mult
-    )
+    G,
+    speed_multiplier=s_mult,
+    volume_multiplier=v_mult,
+    dt=0.4
+)
 
     return jsonify(positions)
 
@@ -102,10 +103,11 @@ def road_heat():
 
     # ✅ Advance the simulation so cars actually move / exist
     _ = get_traffic_positions(
-        G,
-        speed_multiplier=s_mult,
-        volume_multiplier=v_mult
-    )
+    G,
+    speed_multiplier=s_mult,
+    volume_multiplier=v_mult,
+    dt=0.8
+)
 
     # ✅ Now compute heat based on updated vehicle locations
     heat_data = get_road_heat(G)
@@ -141,6 +143,13 @@ def stops():
             'lon': float(x)
         })
     return jsonify(out)
+
+@app.route("/multipliers", methods=["GET"])
+def multipliers():
+    hour = int(request.args.get("hour", 12))
+    v = float(demand_multipliers.get(hour, 1.0))
+    s = float(speed_multipliers.get(hour, 1.0))
+    return jsonify({"hour": hour, "volume_multiplier": v, "speed_multiplier": s})
 
 
 # ============================
